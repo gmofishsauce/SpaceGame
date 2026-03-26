@@ -35,6 +35,7 @@ Star Tank is a single-page web application that renders an interactive 3D visual
 - **FR-009:** Sol (Earth's sun) shall be rendered at position (0, 0, 0) and shall be permanently labeled with the text "Sol". No mouseover interaction is required for Sol.
 - **FR-010:** Each non-Sol star (or co-located group) shall be represented by a marker. All markers shall be visually identical (same size, same color, same shape).
 - **FR-011:** The scene shall not include any continuous animation. All motion in the scene shall be driven solely by user input (camera controls) or mouseover events.
+- **FR-020:** The scene shall render three permanent, solid axis lines through the origin — one aligned with each scene axis (x, y, z) — each extending 25 light-years in both the positive and negative direction along its axis. The axis lines shall be rendered in yellow and shall remain visible at all times, unaffected by mouseover events. No numeric labels, tick marks, or scale indicators are required on the axis lines.
 
 ### 3.4 Camera and Navigation
 
@@ -114,11 +115,11 @@ Each record stored in JavaScript shall contain:
 
 All requirements listed above constitute the MVP. The full set is:
 
-`FR-001` through `FR-018`, `NFR-001` through `NFR-004`, `IR-001`
+`FR-001` through `FR-020`, `NFR-001` through `NFR-004`, `IR-001`
 
 The prototype is intentionally minimal. The following are explicitly **out of scope** for this phase:
 - Varying star appearance by spectral type, magnitude, or mass
-- Any legend, grid, axis labels, or scale indicators
+- Any legend, grid, numeric axis labels, tick marks, or scale indicators on the axis lines
 - Clickable stars or any interaction beyond hover
 - Mobile or touch support
 - Multiple views or UI controls (no buttons, sliders, etc.)
