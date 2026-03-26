@@ -23,14 +23,17 @@ Star Tank is a single-page web application that renders an interactive 3D visual
 - **FR-004**: The star dataset (108 entries from `nearest.csv`) is embedded directly in the JavaScript source. The client makes no runtime fetch of a data file.
 - **FR-005**: Each star's position is converted from equatorial spherical coordinates (RA in hours/minutes/seconds, Dec in degrees/arcminutes/arcseconds, distance in light-years) to Cartesian (x, y, z) using the standard equatorial-to-Cartesian formula, with Sol at the origin (0, 0, 0).
 - **FR-006**: Stars that occupy identical computed positions (co-located pairs or groups, e.g., binary systems represented by a single point in the CSV) are treated as a single marker. All co-located star names are associated with that marker.
-- **FR-007**: For each star the system stores: Cartesian position, catalog name, common name (if present), and a derived `displayName`.
+- **FR-007**: For each star the system stores: Cartesian position, catalog name, common name (if present), a derived `displayName`, and a boolean `hasPlanets` indicating whether at least one confirmed exoplanet is known in that system.
 
 #### 2.3 Scene Rendering
 
 - **FR-008**: The scene renders on a black background.
 - **FR-009**: Sol is rendered at (0, 0, 0) with a permanent visible label "Sol". No mouseover interaction is required for Sol.
-- **FR-010**: Each non-Sol star (or co-located group) is represented by a marker. All markers are visually identical: same size, color, and shape.
+- **FR-010**: Each non-Sol star (or co-located group) is represented by a marker rendered as a small, fixed-size screen-space dot (white, approximately 4 CSS pixels in diameter). The dot does not change apparent size as the camera zooms in or out.
+- **FR-021**: Stars with `hasPlanets: true` additionally display a fixed-size screen-space ring centered on the dot. The ring does not change apparent size as the camera zooms in or out.
+- **FR-022**: The planet ring is visually distinct from the dot but shares the same anchor point in 3D space.
 - **FR-011**: The scene has no continuous time-driven animation. All motion is driven solely by user input (camera controls) or mouseover events.
+- **FR-020**: Three permanent, solid yellow axis lines extend through the origin, one along each scene axis (x, y, z), each spanning ±25 light-years. They are rendered at startup and remain visible at all times; mouseover events do not affect them. No labels, tick marks, or scale indicators appear on the lines.
 
 #### 2.4 Camera and Navigation
 
@@ -248,19 +251,28 @@ type StarGroup struct {
     X, Y, Z     float64  // Three.js scene coordinates (remapped from astro)
     DisplayName string   // text shown on hover (or permanently for Sol)
     IsSol       bool
+    HasPlanets  bool     // true if any star in the group has confirmed exoplanets
 }
 ```
 
 #### Interface
 
 ```go
+// loadPlanets reads the CSV file at csvPath and returns a set of normalized
+// star names that have at least one confirmed planet.  Parenthetical aliases
+// (e.g. "BL Ceti" from "Luyten 726-8 A (BL Ceti)") and "Gliese "→"GJ "
+// normalization are applied to maximise match rate against nearest.csv names.
+func loadPlanets(csvPath string) (map[string]bool, error)
+
 // loadAndProcessStars reads the CSV file at csvPath, parses all rows,
 // converts coordinates, groups co-located stars, and returns the ordered
 // []StarGroup to be written into proto/src/stardata.js.
 // Sol (the Sun) is always the first element (index 0).
+// hasPlanetsSet is the output of loadPlanets; each star's catalog and common
+// names are checked against it to set HasPlanets on the resulting StarGroup.
 // Returns a non-nil error if the file cannot be opened, if any required
 // field is unparseable, or if fewer than 2 rows are found.
-func loadAndProcessStars(csvPath string) ([]StarGroup, error)
+func loadAndProcessStars(csvPath string, hasPlanetsSet map[string]bool) ([]StarGroup, error)
 ```
 
 #### Behavior (pseudocode)
@@ -380,8 +392,8 @@ The generator writes `proto/src/stardata.js` with the following structure:
 // Regenerate with: go run ./tools/gendata
 
 export const STAR_DATA = [
-  { x: 0.000000, y: 0.000000, z: 0.000000, displayName: "Sol", isSol: true },
-  { x: -1.651234, y: -3.787456, z: 1.408234, displayName: "Proxima Centauri", isSol: false },
+  { x: 0.000000, y: 0.000000, z: 0.000000, displayName: "Sol", isSol: true, hasPlanets: false },
+  { x: -1.651234, y: -3.787456, z: 1.408234, displayName: "Proxima Centauri", isSol: false, hasPlanets: true },
   ...
 ];
 ```
@@ -447,7 +459,7 @@ Note: There is no inline `<script>` block and no template substitution. Star dat
 
 **Purpose**: Client-side JavaScript that constructs and manages the Three.js scene, handles user input, implements mouseover detection, and renders the star tank visualization.
 
-**Satisfies**: FR-008, FR-009, FR-010, FR-011, FR-012, FR-013, FR-014, FR-015, FR-016, FR-017, FR-018, FR-019, NFR-001, NFR-003, IR-001
+**Satisfies**: FR-008, FR-009, FR-010, FR-011, FR-012, FR-013, FR-014, FR-015, FR-016, FR-017, FR-018, FR-019, FR-020, FR-021, FR-022, NFR-001, NFR-003, IR-001
 
 **Interface**: None (module with no exports). Imports `STAR_DATA` from `./stardata.js` (i.e., `proto/src/stardata.js`). Appends a `<canvas>` and a CSS2D overlay `<div>` to `document.body`.
 
@@ -465,13 +477,16 @@ Three.js r152+ exports `three/addons/*` via its package.json `exports` map; Vite
 #### 6.4.2 Scene Initialization
 
 ```
-CAMERA_DISTANCE = 35       // units = light-years; > max dataset dist (~22.7 LY)
-STAR_RADIUS     = 0.15     // sphere radius in LY
-STAR_COLOR      = 0xffffff // white
-DASH_SIZE       = 0.4      // LY, for LineDashedMaterial
-GAP_SIZE        = 0.25     // LY, for LineDashedMaterial
-LINE_COLOR      = 0x66aaff // light blue for projection lines
-RAYCAST_THRESHOLD = 0.3    // LY, sphere raycasting tolerance
+CAMERA_DISTANCE   = 35       // units = light-years; > max dataset dist (~22.7 LY)
+STAR_SIZE         = 4        // dot diameter in CSS pixels (sizeAttenuation: false)
+PLANET_RING_SIZE  = 14       // ring diameter in CSS pixels
+STAR_COLOR        = 0xffffff // white
+DASH_SIZE         = 0.4      // LY, for LineDashedMaterial
+GAP_SIZE          = 0.25     // LY, for LineDashedMaterial
+LINE_COLOR        = 0x66aaff // light blue for projection lines
+RAYCAST_THRESHOLD = 0.5      // LY, Points raycasting tolerance
+AXIS_LENGTH       = 25       // LY; extends beyond farthest star (~22.7 LY)
+AXIS_COLOR        = 0xffff00 // yellow
 
 scene    = new THREE.Scene()
 scene.background = new THREE.Color(0x000000)
@@ -503,35 +518,92 @@ controls.addEventListener('change', requestRender)
 
 #### 6.4.3 Star Marker Construction
 
+Stars are rendered as a single `THREE.Points` object (one GL point per star).  Using `sizeAttenuation: false` makes the points render at a fixed pixel size regardless of camera distance, satisfying FR-021.
+
 ```
-starGeometry = new THREE.SphereGeometry(STAR_RADIUS, 8, 6)
-starMaterial = new THREE.MeshBasicMaterial({ color: STAR_COLOR })
+// Build a single BufferGeometry with one position per star.
+positions = Float32Array of length STAR_DATA.length * 3
+for i, entry in STAR_DATA:
+  positions[i*3]   = entry.x
+  positions[i*3+1] = entry.y
+  positions[i*3+2] = entry.z
 
-starMeshes = []   // array of THREE.Mesh, indices match STAR_DATA (non-Sol only)
+pointsGeometry = new THREE.BufferGeometry()
+pointsGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
 
-for each entry in STAR_DATA:
-  mesh = new THREE.Mesh(starGeometry, starMaterial)
-  mesh.position.set(entry.x, entry.y, entry.z)
-  mesh.userData.starIndex = index    // index into STAR_DATA
-  scene.add(mesh)
+pointsMaterial = new THREE.PointsMaterial({
+  color: STAR_COLOR,
+  size: STAR_SIZE,
+  sizeAttenuation: false,   // fixed screen-space size; satisfies FR-021
+})
 
-  if entry.isSol:
-    // Attach permanent "Sol" label
-    div = document.createElement('div')
-    div.className = 'star-label'
-    div.textContent = 'Sol'
-    label = new CSS2DObject(div)
-    label.position.set(0, 0, 0)
-    mesh.add(label)
-  else:
-    starMeshes.push(mesh)
+starPoints = new THREE.Points(pointsGeometry, pointsMaterial)
+scene.add(starPoints)
 ```
 
-`starMeshes` is used by the raycaster (Sol is excluded since FR-009 specifies no mouseover for Sol).
+Raycasting uses `raycaster.intersectObject(starPoints)`.  The intersection result's `.index` field is the index into `STAR_DATA` for the nearest hit point.  The raycaster threshold (`raycaster.params.Points.threshold`) is set to `RAYCAST_THRESHOLD` (world units).  Because the points are fixed screen-size, the effective hit area in pixels shrinks slightly as the user zooms out; this is acceptable for the prototype.
 
-The shared `starGeometry` and `starMaterial` are reused for all markers (including Sol), satisfying FR-010 (all identical), FR-009 (Sol same shape), and reducing GPU memory.
+Sol's permanent label is attached directly to the scene as a `CSS2DObject` at position (0, 0, 0):
 
-#### 6.4.4 Raycasting / Mouseover
+```
+solDiv = document.createElement('div')
+solDiv.className = 'star-label'
+solDiv.textContent = 'Sol'
+solLabel = new CSS2DObject(solDiv)
+solLabel.position.set(0, 0, 0)
+scene.add(solLabel)
+```
+
+For each star with `hasPlanets: true`, a CSS2DObject carrying a ring `<div>` is attached to the scene at the star's position (satisfying FR-022).  The ring is a hollow circle sized with CSS in pixels, so it is inherently fixed screen-space:
+
+```
+for i, entry in STAR_DATA:
+  if not entry.hasPlanets: continue
+  ringDiv = document.createElement('div')
+  ringDiv.className = 'planet-ring'
+  ringObj = new CSS2DObject(ringDiv)
+  ringObj.position.set(entry.x, entry.y, entry.z)
+  scene.add(ringObj)
+```
+
+CSS for the ring (added to `index.html`):
+
+```css
+.planet-ring {
+  width:  14px;          /* PLANET_RING_SIZE */
+  height: 14px;
+  border: 1px solid #ffffff;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+```
+
+The `transform: translate(-50%, -50%)` centres the ring on the CSS2DRenderer's anchor point, which is the projected screen position of the star.
+
+#### 6.4.4 Axis Line Construction
+
+Three `THREE.Line` objects are added to the scene at startup — one per coordinate axis. They use `THREE.LineBasicMaterial` (solid, not dashed) in `AXIS_COLOR` (yellow). Each line spans from −`AXIS_LENGTH` to +`AXIS_LENGTH` along its respective axis, passing through the origin. All three lines share a single `axisMaterial` instance.
+
+```
+axisMaterial = new THREE.LineBasicMaterial({ color: AXIS_COLOR })
+axes = [
+  [Vector3(-AXIS_LENGTH, 0,           0          ), Vector3(AXIS_LENGTH, 0,           0          )],  // X-axis
+  [Vector3(0,            -AXIS_LENGTH, 0          ), Vector3(0,           AXIS_LENGTH, 0          )],  // Y-axis (astro z, north celestial pole direction)
+  [Vector3(0,            0,           -AXIS_LENGTH), Vector3(0,           0,           AXIS_LENGTH)],  // Z-axis (astro −y direction)
+]
+for each [a, b] in axes:
+  geo = new THREE.BufferGeometry().setFromPoints([a, b])
+  scene.add(new THREE.Line(geo, axisMaterial))
+```
+
+The axis lines are permanent scene objects. They are constructed once and never removed or modified. No geometry or material disposal is required because the lines persist for the entire page lifetime. Mouseover and raycasting do not interact with them (they are not the `starPoints` object passed to the raycaster).
+
+**Satisfies**: FR-020
+
+---
+
+#### 6.4.5 Raycasting / Mouseover
 
 Module-level state:
 ```javascript
@@ -542,7 +614,7 @@ let hoverLines = []            // array of up to 3 THREE.Line objects
 
 ```
 raycaster = new THREE.Raycaster()
-raycaster.params.Mesh.threshold = RAYCAST_THRESHOLD
+raycaster.params.Points.threshold = RAYCAST_THRESHOLD
 mouse = new THREE.Vector2()
 
 window.addEventListener('mousemove', (event) => {
@@ -551,10 +623,11 @@ window.addEventListener('mousemove', (event) => {
   mouse.y = -(event.clientY / window.innerHeight) * 2 + 1
 
   raycaster.setFromCamera(mouse, camera)
-  intersects = raycaster.intersectObjects(starMeshes)
+  intersects = raycaster.intersectObject(starPoints)
 
   if intersects.length > 0:
-    newIndex = intersects[0].object.userData.starIndex
+    newIndex = intersects[0].index   // index into STAR_DATA
+    if newIndex is Sol index: skip   // Sol has no mouseover per FR-009
     if newIndex !== currentHoveredIndex:
       clearHoverElements()
       showHoverElements(newIndex)
@@ -568,7 +641,7 @@ window.addEventListener('mousemove', (event) => {
 })
 ```
 
-#### 6.4.5 `showHoverElements(starIndex)`
+#### 6.4.6 `showHoverElements(starIndex)`
 
 ```
 star = STAR_DATA[starIndex]
@@ -592,7 +665,7 @@ hoverLines = [
 for line of hoverLines: scene.add(line)
 ```
 
-#### 6.4.6 `clearHoverElements()`
+#### 6.4.7 `clearHoverElements()`
 
 ```
 if hoverLabel !== null:
@@ -607,7 +680,7 @@ for line of hoverLines:
 hoverLines = []
 ```
 
-#### 6.4.7 `makeDashedLine(pointA, pointB)`
+#### 6.4.8 `makeDashedLine(pointA, pointB)`
 
 ```
 function makeDashedLine(a, b):
@@ -622,7 +695,7 @@ function makeDashedLine(a, b):
   return line
 ```
 
-#### 6.4.8 Demand Rendering (FR-011)
+#### 6.4.9 Demand Rendering (FR-011)
 
 ```javascript
 let renderPending = false
@@ -790,7 +863,9 @@ SpaceGame/
 │   └── gendata/
 │       └── main.go                # Go generator: nearest.csv → proto/src/stardata.js
 ├── nearest.csv                    # Source star data (existing, unchanged)
+├── requirements.md                # Prototype requirements (root-level; informs future game)
 └── proto/
+    ├── design.md                  # This document — prototype-specific design
     ├── index.html                 # Vite entry-point HTML (plain HTML, no Go template)
     ├── src/
     │   ├── main.js                # Three.js application (ES module)
@@ -815,8 +890,9 @@ SpaceGame/
 | Path | Status |
 |------|--------|
 | `nearest.csv` | Unchanged — read by `tools/gendata` at project root |
-| `requirements.md` | Unchanged |
+| `requirements.md` | Unchanged — lives at project root; describes the prototype vision and informs future game design |
 | `README.md` | Unchanged |
+| `proto/design.md` | This document — moved from project root into `proto/` because it describes the prototype implementation only |
 
 ### Setup and Run
 
@@ -854,18 +930,21 @@ No `go.mod` changes are required beyond the existing module declaration (standar
 | FR-008 | 6.4.2 Scene Initialization | `proto/src/main.js` |
 | FR-009 | 6.4.3 Star Marker Construction | `proto/src/main.js` |
 | FR-010 | 6.4.3 | `proto/src/main.js` |
-| FR-011 | 6.4.8 Demand Rendering | `proto/src/main.js` |
+| FR-011 | 6.4.9 Demand Rendering | `proto/src/main.js` |
 | FR-012 | 6.4.2 (OrbitControls left-drag) | `proto/src/main.js` |
 | FR-013 | 6.4.2 (OrbitControls scroll) | `proto/src/main.js` |
 | FR-014 | 6.4.2 (OrbitControls right-drag) | `proto/src/main.js` |
-| FR-015 | 6.4.5 showHoverElements | `proto/src/main.js` |
-| FR-016 | 6.4.5, 6.4.7 | `proto/src/main.js` |
-| FR-017 | 6.4.6 clearHoverElements | `proto/src/main.js` |
-| FR-018 | 6.4.4 Raycasting (one-at-a-time guard) | `proto/src/main.js` |
+| FR-015 | 6.4.6 showHoverElements | `proto/src/main.js` |
+| FR-016 | 6.4.6, 6.4.8 | `proto/src/main.js` |
+| FR-017 | 6.4.7 clearHoverElements | `proto/src/main.js` |
+| FR-018 | 6.4.5 Raycasting (one-at-a-time guard) | `proto/src/main.js` |
 | FR-019 | 6.4.2 Camera position | `proto/src/main.js` |
+| FR-020 | 6.4.4 Axis Line Construction | `proto/src/main.js` |
+| FR-021 | 6.4.3 Star Marker Construction (PointsMaterial sizeAttenuation: false) | `proto/src/main.js` |
+| FR-022 | 6.4.3 Star Marker Construction (CSS2D planet ring) | `proto/src/main.js`, `proto/index.html` |
 | NFR-001 | 6.4 (ES modules, standard APIs) | `proto/src/main.js`, `proto/index.html` |
 | NFR-002 | 6.1 (Vite dev server startup) | `proto/package.json` (`npm run dev`) |
-| NFR-003 | 6.4.4 (single-frame update; no async in hover path) | `proto/src/main.js` |
+| NFR-003 | 6.4.5 (single-frame update; no async in hover path) | `proto/src/main.js` |
 | NFR-004 | 6.5 Three.js served locally by Vite from node_modules | `proto/package.json`, `proto/node_modules/` |
 | IR-001 | 6.4.1 imports, 6.5 | `proto/src/main.js`, `proto/package.json` |
 
@@ -907,7 +986,7 @@ No `go.mod` changes are required beyond the existing module declaration (standar
 
 | Test | Expected result | Satisfies |
 |------|----------------|-----------|
-| Load `http://localhost:5173` | Black background, ~107 white dots, "Sol" label at center | FR-008, FR-009, FR-010 |
+| Load `http://localhost:5173` | Black background, ~107 white dots, "Sol" label at center, three yellow axis lines crossing at origin | FR-008, FR-009, FR-010, FR-020 |
 | Page loads with no internet connection | Scene renders fully (no CDN errors in browser console) | NFR-004 |
 | Click-drag on the scene | Scene orbits around origin | FR-012 |
 | Scroll wheel | Scene zooms in and out | FR-013 |
@@ -920,6 +999,8 @@ No `go.mod` changes are required beyond the existing module declaration (standar
 | Initial page load, no interaction | Camera is positioned so all stars are visible; scene is seen at an oblique angle | FR-019 |
 | Dev server start time | Time from `npm run dev` to "ready" message in terminal is < 2 seconds | NFR-002 |
 | No spontaneous motion | After loading, scene is static unless user input occurs | FR-011 |
+| Hover over a star | Three yellow axis lines remain continuously visible; they are not affected by the hover state | FR-020 |
+| Orbit, zoom, or pan | Three yellow axis lines remain continuously visible throughout all camera movements | FR-020 |
 
 ### Edge Cases
 

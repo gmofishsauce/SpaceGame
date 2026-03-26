@@ -31,6 +31,7 @@ type StarGroup struct {
 	Z           float64
 	DisplayName string
 	IsSol       bool
+	HasPlanets  bool
 }
 
 type groupKey struct {
@@ -38,8 +39,9 @@ type groupKey struct {
 }
 
 type partialGroup struct {
-	X, Y, Z float64
-	names   []string
+	X, Y, Z    float64
+	names      []string
+	hasPlanets bool
 }
 
 func parseRA(raStr string) (float64, error) {
@@ -110,7 +112,82 @@ func convertToAstroCartesian(raStr, decStr string, distLY float64) (float64, flo
 	return ax, ay, az, nil
 }
 
-func loadAndProcessStars(csvPath string) ([]StarGroup, error) {
+// normalizeName lowercases s and replaces the "Gliese " prefix with "GJ "
+// so that planets.csv names like "Gliese 687" match nearest.csv catalog
+// names like "GJ 687".
+func normalizeName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.ReplaceAll(s, "gliese ", "gj ")
+}
+
+// loadPlanets reads planets.csv and returns a set of normalized star names
+// that have at least one confirmed planet.  For each row the full star name
+// is added, and if the name contains a parenthetical alias (e.g. "Luyten
+// 726-8 A (BL Ceti)") the alias is added as well.
+func loadPlanets(csvPath string) (map[string]bool, error) {
+	f, err := os.Open(csvPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", csvPath, err)
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	r.LazyQuotes = true
+
+	// discard header
+	if _, err := r.Read(); err != nil {
+		return nil, fmt.Errorf("reading header: %w", err)
+	}
+
+	set := map[string]bool{}
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading %q: %w", csvPath, err)
+		}
+		if len(record) < 4 {
+			continue
+		}
+		starName := strings.TrimSpace(record[0])
+		confirmed := strings.TrimSpace(record[3])
+		hp := confirmed != "" && !strings.HasPrefix(strings.ToLower(confirmed), "none")
+
+		addName := func(name string) {
+			key := normalizeName(name)
+			if hp {
+				set[key] = true
+			} else if _, exists := set[key]; !exists {
+				set[key] = false
+			}
+		}
+
+		addName(starName)
+
+		// Extract parenthetical alias: "Name (Alias)" -> also register "Alias"
+		if i := strings.Index(starName, "("); i >= 0 {
+			if j := strings.Index(starName, ")"); j > i {
+				addName(strings.TrimSpace(starName[i+1 : j]))
+			}
+		}
+	}
+	return set, nil
+}
+
+// starHasPlanets reports whether s matches any entry in the planets set.
+func starHasPlanets(s rawStar, set map[string]bool) bool {
+	if set[normalizeName(s.commonName)] {
+		return true
+	}
+	if set[normalizeName(s.catalogName)] {
+		return true
+	}
+	return false
+}
+
+func loadAndProcessStars(csvPath string, hasPlanetsSet map[string]bool) ([]StarGroup, error) {
 	f, err := os.Open(csvPath)
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", csvPath, err)
@@ -211,11 +288,16 @@ func loadAndProcessStars(csvPath string) ([]StarGroup, error) {
 			preferred = s.catalogName
 		}
 
+		hp := starHasPlanets(s, hasPlanetsSet)
+
 		k := groupKey{s.raStr, s.decStr, s.distStr}
 		if pg, exists := groupMap[k]; exists {
 			pg.names = append(pg.names, preferred)
+			if hp {
+				pg.hasPlanets = true
+			}
 		} else {
-			groupMap[k] = &partialGroup{X: jx, Y: jy, Z: jz, names: []string{preferred}}
+			groupMap[k] = &partialGroup{X: jx, Y: jy, Z: jz, names: []string{preferred}, hasPlanets: hp}
 			groupOrder = append(groupOrder, k)
 		}
 	}
@@ -233,6 +315,7 @@ func loadAndProcessStars(csvPath string) ([]StarGroup, error) {
 			Z:           pg.Z,
 			DisplayName: displayName,
 			IsSol:       false,
+			HasPlanets:  pg.hasPlanets,
 		})
 	}
 
@@ -249,7 +332,12 @@ func jsonString(s string) string {
 }
 
 func main() {
-	groups, err := loadAndProcessStars("nearest.csv")
+	hasPlanetsSet, err := loadPlanets("planets.csv")
+	if err != nil {
+		log.Fatalf("loadPlanets: %v", err)
+	}
+
+	groups, err := loadAndProcessStars("nearest.csv", hasPlanetsSet)
 	if err != nil {
 		log.Fatalf("loadAndProcessStars: %v", err)
 	}
@@ -273,12 +361,17 @@ func main() {
 		if g.IsSol {
 			isSolStr = "true"
 		}
-		fmt.Fprintf(f, "  { x: %s, y: %s, z: %s, displayName: %s, isSol: %s },\n",
+		hasPlanetsStr := "false"
+		if g.HasPlanets {
+			hasPlanetsStr = "true"
+		}
+		fmt.Fprintf(f, "  { x: %s, y: %s, z: %s, displayName: %s, isSol: %s, hasPlanets: %s },\n",
 			formatFloat(g.X),
 			formatFloat(g.Y),
 			formatFloat(g.Z),
 			jsonString(g.DisplayName),
 			isSolStr,
+			hasPlanetsStr,
 		)
 	}
 	fmt.Fprintln(f, "];")

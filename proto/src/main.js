@@ -4,12 +4,14 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { STAR_DATA } from './stardata.js';
 
 const CAMERA_DISTANCE  = 35;    // light-years; > max dataset dist (~22.7 LY)
-const STAR_RADIUS      = 0.15;  // sphere radius in LY
+const STAR_SIZE        = 4;     // dot diameter in CSS pixels (sizeAttenuation: false)
 const STAR_COLOR       = 0xffffff;
 const DASH_SIZE        = 0.4;   // LY
 const GAP_SIZE         = 0.25;  // LY
 const LINE_COLOR       = 0x66aaff;
-const RAYCAST_THRESHOLD = 0.3;  // LY
+const RAYCAST_THRESHOLD = 0.5;  // LY, for Points raycasting
+const AXIS_LENGTH      = 25;    // LY; just outside farthest star (~22.7 LY)
+const AXIS_COLOR       = 0xffff00;
 
 // --- Scene ---
 const scene = new THREE.Scene();
@@ -31,7 +33,7 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// --- CSS2D Renderer (for labels) ---
+// --- CSS2D Renderer (for labels and planet rings) ---
 const css2DRenderer = new CSS2DRenderer();
 css2DRenderer.setSize(window.innerWidth, window.innerHeight);
 css2DRenderer.domElement.style.position = 'absolute';
@@ -45,34 +47,63 @@ controls.target.set(0, 0, 0);
 controls.enableDamping = false;
 controls.addEventListener('change', requestRender);
 
-// --- Star Markers ---
-const starGeometry = new THREE.SphereGeometry(STAR_RADIUS, 8, 6);
-const starMaterial = new THREE.MeshBasicMaterial({ color: STAR_COLOR });
+// --- Star Markers (single Points object) ---
+const positions = new Float32Array(STAR_DATA.length * 3);
+for (let i = 0; i < STAR_DATA.length; i++) {
+  positions[i * 3]     = STAR_DATA[i].x;
+  positions[i * 3 + 1] = STAR_DATA[i].y;
+  positions[i * 3 + 2] = STAR_DATA[i].z;
+}
+const pointsGeometry = new THREE.BufferGeometry();
+pointsGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
-const starMeshes = [];  // non-Sol meshes only, for raycasting
+const pointsMaterial = new THREE.PointsMaterial({
+  color: STAR_COLOR,
+  size: STAR_SIZE,
+  sizeAttenuation: false,
+});
 
+const starPoints = new THREE.Points(pointsGeometry, pointsMaterial);
+scene.add(starPoints);
+
+// --- Sol permanent label ---
+{
+  const div = document.createElement('div');
+  div.className = 'star-label';
+  div.textContent = 'Sol';
+  const label = new CSS2DObject(div);
+  label.position.set(0, 0, 0);
+  scene.add(label);
+}
+
+// --- Planet rings (CSS2D, fixed screen-space size) ---
 for (let i = 0; i < STAR_DATA.length; i++) {
   const entry = STAR_DATA[i];
-  const mesh = new THREE.Mesh(starGeometry, starMaterial);
-  mesh.position.set(entry.x, entry.y, entry.z);
-  mesh.userData.starIndex = i;
-  scene.add(mesh);
+  if (!entry.hasPlanets) continue;
+  const div = document.createElement('div');
+  div.className = 'planet-ring';
+  const ring = new CSS2DObject(div);
+  ring.position.set(entry.x, entry.y, entry.z);
+  scene.add(ring);
+}
 
-  if (entry.isSol) {
-    const div = document.createElement('div');
-    div.className = 'star-label';
-    div.textContent = 'Sol';
-    const label = new CSS2DObject(div);
-    label.position.set(0, 0, 0);
-    mesh.add(label);
-  } else {
-    starMeshes.push(mesh);
+// --- Axis Lines ---
+{
+  const axisMaterial = new THREE.LineBasicMaterial({ color: AXIS_COLOR });
+  const axes = [
+    [new THREE.Vector3(-AXIS_LENGTH, 0, 0), new THREE.Vector3(AXIS_LENGTH, 0, 0)],
+    [new THREE.Vector3(0, -AXIS_LENGTH, 0), new THREE.Vector3(0, AXIS_LENGTH, 0)],
+    [new THREE.Vector3(0, 0, -AXIS_LENGTH), new THREE.Vector3(0, 0, AXIS_LENGTH)],
+  ];
+  for (const [a, b] of axes) {
+    const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+    scene.add(new THREE.Line(geo, axisMaterial));
   }
 }
 
 // --- Raycaster / Mouseover State ---
 const raycaster = new THREE.Raycaster();
-raycaster.params.Mesh = { threshold: RAYCAST_THRESHOLD };
+raycaster.params.Points = { threshold: RAYCAST_THRESHOLD };
 const mouse = new THREE.Vector2();
 
 let currentHoveredIndex = -1;
@@ -126,16 +157,19 @@ function clearHoverElements() {
   hoverLines = [];
 }
 
+// Sol is always index 0 in STAR_DATA; it has no mouseover per FR-009.
+const SOL_INDEX = 0;
+
 window.addEventListener('mousemove', (event) => {
   mouse.x =  (event.clientX / window.innerWidth)  * 2 - 1;
   mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
   raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObjects(starMeshes);
+  const intersects = raycaster.intersectObject(starPoints);
 
   if (intersects.length > 0) {
-    const newIndex = intersects[0].object.userData.starIndex;
-    if (newIndex !== currentHoveredIndex) {
+    const newIndex = intersects[0].index;
+    if (newIndex !== SOL_INDEX && newIndex !== currentHoveredIndex) {
       clearHoverElements();
       showHoverElements(newIndex);
       currentHoveredIndex = newIndex;
