@@ -24,7 +24,7 @@ Star Tank is a single-page web application that renders an interactive 3D visual
 
 ### 3.2 Star Data
 
-- **FR-004:** The star dataset (108 entries derived from `nearest.csv`) shall be embedded directly in the JavaScript source; no runtime data file fetch is required.
+- **FR-004:** The star dataset (108 entries derived from `nearest.csv` and `planets.csv`) shall be embedded directly in the JavaScript source; no runtime data file fetch is required.
 - **FR-005:** The system shall convert each star's position from equatorial spherical coordinates (right ascension in hours/minutes/seconds, declination in degrees/arcminutes/arcseconds, distance in light-years) to Cartesian (x, y, z) coordinates using the standard equatorial-to-Cartesian conversion, with Earth/Sol at the origin (0, 0, 0).
 - **FR-006:** Stars that share identical coordinates (co-located pairs or groups, e.g. Alpha Centauri A and B) shall be treated as a single marker. The names of all co-located stars shall be associated with that single marker.
 - **FR-007:** For each star the system shall store: Cartesian position, catalog name (GJ designation or equivalent), and common name if one exists in the source data.
