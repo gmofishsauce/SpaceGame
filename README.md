@@ -1,2 +1,2 @@
 # SpaceGame
-A limited information chess game using science fiction tropes
+A limited information strategy game using science fiction tropes. See `./VisionStatement.md`.
