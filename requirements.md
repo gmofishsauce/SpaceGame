@@ -1,8 +1,8 @@
-# Requirements: Star Tank Prototype
+# Requirements: SpaceGame
 
 ## 1. Overview
 
-Star Tank is a single-page web application that renders an interactive 3D visualization of the 108 nearest star systems to Earth, in the style of the "star tank" display found on the bridge of a starship in science fiction. The primary user is a solo developer evaluating whether the visual result is suitable as the foundation for a game. The application is served by a minimal Go web server. There is no backend logic beyond file serving; all rendering is performed client-side using Three.js.
+SpaceGame is a single-player, real-time interstellar strategy game served as a single-page web application on localhost. The player commands humanity's defenses against an alien invasion across the ~108 nearest star systems, operating from Earth under a strict limited-information constraint: all data arrives and all commands travel at the speed of light. A built-in bot drives the alien side. A single session lasts 2–4 real-time hours and covers hundreds of in-game years. The game is intended to reward deliberate strategic thought rather than twitch responses.
 
 ---
 
@@ -10,7 +10,9 @@ Star Tank is a single-page web application that renders an interactive 3D visual
 
 | Role | Description |
 |------|-------------|
-| **Developer / Evaluator** | Single user running the server locally. Views the star map, navigates the scene, and assesses visual suitability. No authentication or multi-user support is required. |
+| **Human Player** | Sole interactive user. Plays from Earth's perspective, issuing construction and movement orders, viewing the star map and event log. |
+| **Bot Opponent** | Software agent driving the alien side. Not visible or configurable by the player. Interacts with the game engine through a defined API. |
+| **Developer** | Runs the server locally; may adjust bot behavior and game parameters in code. |
 
 ---
 
@@ -18,42 +20,121 @@ Star Tank is a single-page web application that renders an interactive 3D visual
 
 ### 3.1 Web Server
 
-- **FR-001:** The system shall include a Go HTTP server that listens on port 8080.
+- **FR-001:** The system shall include a Go HTTP server that listens on port 8080 on localhost only.
 - **FR-002:** The server shall serve a single HTML page (with embedded or bundled CSS and JavaScript) at the root path `/`.
-- **FR-003:** The server shall require no external dependencies beyond the Go standard library.
+- **FR-003:** The server shall require no external Go dependencies beyond the standard library.
+- **FR-004:** The server shall maintain authoritative game state and the internal event log; the client shall not be the source of truth for game state.
 
-### 3.2 Star Data
+### 3.2 Game Initialization
 
-- **FR-004:** The star dataset (108 entries derived from `nearest.csv` and `planets.csv`) shall be embedded directly in the JavaScript source; no runtime data file fetch is required.
-- **FR-005:** The system shall convert each star's position from equatorial spherical coordinates (right ascension in hours/minutes/seconds, declination in degrees/arcminutes/arcseconds, distance in light-years) to Cartesian (x, y, z) coordinates using the standard equatorial-to-Cartesian conversion, with Earth/Sol at the origin (0, 0, 0).
-- **FR-006:** Stars that share identical coordinates (co-located pairs or groups, e.g. Alpha Centauri A and B) shall be treated as a single marker. The names of all co-located stars shall be associated with that single marker.
-- **FR-007:** For each star the system shall store: Cartesian position, catalog name (GJ designation or equivalent), and common name if one exists in the source data.
+- **FR-005:** At the start of a new game, the system shall load star data from `nearest.csv` and `planets.csv` and determine which systems are human-held at game start.
+- **FR-006:** All star systems that have one or more planets in `planets.csv` shall be initialized as human-held.
+- **FR-007:** All star systems without planets whose distance from Sol is less than or equal to half the distance of the farthest star in `nearest.csv` shall also be initialized as human-held.
+- **FR-008:** Each human-held star system shall be assigned an initial economic level (1–5) drawn from a Gaussian distribution, except Earth (Sol), which shall always be initialized at economic level 5.
+- **FR-009:** Alien attacks shall begin from randomized entry points at the periphery of human space; the entry point(s) shall be re-randomized at the start of each new game.
+- **FR-010:** No alien-held systems shall appear on the map at game start; alien presence is revealed only through combat events reported back to Earth.
 
-### 3.3 Scene Rendering
+### 3.3 Game Time
 
-- **FR-008:** The scene shall render on a black background.
-- **FR-009:** Sol (Earth's sun) shall be rendered at position (0, 0, 0) and shall be permanently labeled with the text "Sol". No mouseover interaction is required for Sol.
-- **FR-010:** Each non-Sol star (or co-located group) shall be represented by a marker. All markers shall be visually identical (same size, same color, same shape).
-- **FR-011:** The scene shall not include any continuous animation. All motion in the scene shall be driven solely by user input (camera controls) or mouseover events.
-- **FR-020:** The scene shall render three permanent, solid axis lines through the origin — one aligned with each scene axis (x, y, z) — each extending 25 light-years in both the positive and negative direction along its axis. The axis lines shall be rendered in yellow and shall remain visible at all times, unaffected by mouseover events. No numeric labels, tick marks, or scale indicators are required on the axis lines.
+- **FR-011:** The system shall maintain an internal game clock measured in pulsar-calibrated in-universe years, initialized to year 0 at game start.
+- **FR-012:** Game time shall advance continuously at a fixed rate of 10 in-universe years per 3 real-time minutes (approximately 3.33 in-universe years per real-time minute). This rate shall be a named, tunable constant in the code.
+- **FR-013:** The player shall be able to pause and unpause the game by pressing the Escape key. All game simulation, time advancement, and bot activity shall halt while paused.
+- **FR-014:** The current in-universe year shall be displayed permanently in the game UI.
 
-### 3.4 Camera and Navigation
+### 3.4 Information and the Event Log
 
-- **FR-019:** The default (initial) camera position shall be placed outside the full extent of the star dataset, along a diagonal that produces an upper-left to lower-right perspective when the page first loads. Specifically, the camera shall be positioned at a point with positive x, positive y, and positive z values (e.g. approximately equal magnitudes on all three axes) at a distance from the origin greater than the farthest star in the dataset, looking toward the origin (0, 0, 0). This ensures all stars are visible in the initial view and the z=0 reference plane is seen at an oblique angle rather than face-on or edge-on.
+- **FR-015:** The system shall maintain an internal event log. Every game event (combat occurrence, combat result, construction completion, fleet arrival, reporter return, failed command execution, alien attack) shall be recorded in the event log with the in-universe year in which it occurred and the star system in which it occurred.
+- **FR-016:** The system shall compute, for each event, the earliest in-universe year at which that event's information could have reached Earth, based on the distance of the event's star system from Sol and a light-speed propagation rate. Events that originate from a reporter or similar vessel shall use the reporter's travel time rather than light-speed.
+- **FR-017:** The player UI shall only display information about an event after the current game clock has reached or passed that event's Earth-arrival year. No future or in-transit information shall be shown to the player.
+- **FR-018:** When the player views a star system's status (via mouseover or right-click), the system shall display the most recent information about that system that has had time to reach Earth, along with the in-universe year that information was current.
 
-- **FR-012:** The user shall be able to orbit the scene by clicking and dragging.
-- **FR-013:** The user shall be able to zoom in and out using the scroll wheel.
-- **FR-014:** The user shall be able to pan the scene using right-click drag (standard Three.js OrbitControls behavior).
+### 3.5 Star Map Display
 
-### 3.5 Mouseover Interaction
+- **FR-019:** The star map shall render all star systems from `nearest.csv` as a 3D interactive display using Three.js, with Sol at the origin, consistent with the existing prototype.
+- **FR-020:** Each star system marker shall have a distinct visual appearance based on its most recently known status as received at Earth. Required states are: *human-held*, *alien-held*, *contested* (combat reported), *status unknown or stale*, and *uninhabited*.
+- **FR-021:** When the player moves the mouse over a star system marker, the system shall display a popup or overlay showing: the system's name, its most recently known status, the in-universe year that information was current, its known economic level (if any), and known forces present (if any).
+- **FR-022:** The existing prototype mouseover behavior (dotted axis-projection lines, name label) shall be retained and extended to include the game status information described in FR-021.
+- **FR-023:** Sol shall always display current accurate information (no light-travel delay).
+- **FR-024:** Camera navigation (orbit, zoom, pan) shall be retained from the prototype.
 
-- **FR-015:** When the user moves the mouse pointer over a star marker, the system shall display the star's name adjacent to the marker. If a common name exists for that star (or group), the common name shall be displayed; otherwise the catalog name shall be displayed. For co-located groups with multiple names, all names shall be displayed.
-- **FR-016:** When the user moves the mouse pointer over a star marker, the system shall render three dotted lines:
-  - A dotted line from the star's projected position on the z=0 plane — (x, y, 0) — to the point (x, 0, 0) on the x-axis.
-  - A dotted line from the star's projected position on the z=0 plane — (x, y, 0) — to the point (0, y, 0) on the y-axis.
-  - A dotted line from the star's projected position on the z=0 plane — (x, y, 0) — vertically to the star's actual position (x, y, z).
-- **FR-017:** When the user moves the mouse pointer off a star marker, the name label and all dotted lines associated with that marker shall be removed from the scene immediately.
-- **FR-018:** No more than one star's label and projection lines shall be visible at a time.
+### 3.6 Event Sidebar
+
+- **FR-025:** The UI shall include a sidebar displaying a scrolling log of events in the order they became known to Earth (i.e., sorted by Earth-arrival year).
+- **FR-026:** Each entry in the event log sidebar shall include at minimum: the in-universe year the information arrived at Earth, the star system involved, and a short description of the event.
+- **FR-027:** When the player moves the mouse over an event in the sidebar, the system shall visually highlight the corresponding star system marker in the star map.
+- **FR-028:** The sidebar shall scroll automatically to show new events as they arrive, but shall allow the player to scroll back through history.
+
+### 3.7 Player Actions — General
+
+- **FR-029:** The player shall initiate all actions by right-clicking on a star system marker, which shall display a context menu of available actions for that system.
+- **FR-030:** The context menu shall only present actions that are valid for the selected system given its most recently known state as received at Earth.
+- **FR-031:** All player commands issued to a non-Sol star system shall be subject to a command-travel delay equal to the distance from Sol to the target system divided by 0.8 (in in-universe years), representing transmission at the speed of light. Commands to Sol take effect immediately.
+- **FR-032:** When presenting construction or fleet movement options for a distant system, the UI shall display projected estimates of the system's state at the time the command is expected to arrive, not the current known state.
+- **FR-033:** If a command arrives at a star system and cannot be executed as issued (e.g., insufficient economic output, forces no longer present), the system shall record a failed-execution event in the event log. This event shall propagate back to Earth subject to normal light-travel delay and appear in the player's event sidebar upon arrival.
+
+### 3.8 Player Actions — Construction
+
+- **FR-034:** When a system is capable of construction, the right-click context menu shall include a "Construct…" option.
+- **FR-035:** Selecting "Construct…" shall open a dialog displaying the available weapon types and their costs, filtered to what the system's (projected) economic level can support.
+- **FR-036:** The player shall select a weapon type to construct; the construction order shall be dispatched and arrive after the command-travel delay.
+
+### 3.9 Player Actions — Fleet Command
+
+- **FR-037:** When a system has one or more fleets with interstellar capability, the right-click context menu shall include a "Command…" option.
+- **FR-038:** Selecting "Command…" shall open a dialog from which the player can select a fleet present in the system and a destination star system.
+- **FR-039:** Upon confirmation, the fleet movement order shall be dispatched and arrive after the command-travel delay. The fleet shall then depart and travel to the destination at 0.8c.
+
+### 3.10 Forces and Weapons
+
+- **FR-040:** The system shall support the following weapon types, in ascending order of cost and capability:
+
+| Weapon Type | Interstellar Capable | Notes |
+|-------------|---------------------|-------|
+| Orbital Defense | No | Automated local defense; lowest cost |
+| Interceptor | No | Local combat ships; no interstellar drive |
+| Reporter | Yes | Unarmed; returns to Earth automatically if combat occurs in its system |
+| Escort | Yes | Armed interstellar vessel; mid-tier cost |
+| Battleship | Yes | Armed interstellar vessel; highest cost and combat power |
+
+- **FR-041:** Interstellar-capable ships (reporters, escorts, battleships) shall travel between star systems at 0.8c. This speed shall be a named, tunable constant in the code.
+- **FR-042:** Ships with interstellar drives shall be grouped into named fleets. Fleet names shall be automatically assigned by the system (e.g., "Fleet 1", "2nd Battle Group").
+- **FR-043:** Each star system shall track quantities of each weapon type present, grouped into fleets where applicable.
+- **FR-044:** The minimum economic level required to construct each weapon type shall be a named, tunable constant in the code.
+
+### 3.11 Economic System
+
+- **FR-045:** Each human-held star system shall have an economic level between 1 and 5 inclusive.
+- **FR-046:** Economic output shall accumulate over time in each system as a function of its economic level. The rate of accumulation per economic level shall be a named, tunable constant in the code.
+- **FR-047:** Constructing a weapon shall deduct its cost from the system's accumulated economic output. Construction that exceeds available output shall not be permitted.
+- **FR-048:** Economic levels and output shall not be directly actionable by the player; they are properties of the system that grow or change due to game events.
+
+### 3.12 Combat
+
+- **FR-049:** Combat shall occur automatically when alien and human forces are present in the same star system at the same in-universe time.
+- **FR-050:** Combat shall be resolved entirely by the game engine as a stochastic function of the types and quantities of forces present. The player has no input into combat resolution.
+- **FR-051:** Combat shall only occur within star systems, never during interstellar transit.
+- **FR-052:** A combat event shall be recorded in the internal event log regardless of whether reporting forces are present.
+- **FR-053:** A combat event's results shall only propagate to Earth (and appear in the event sidebar) if a reporter or other reporting-capable vessel was present in the system during combat. Otherwise, only the occurrence of combat (not its outcome) may eventually be inferred from other signals.
+- **FR-054:** A star system captured by alien forces shall change its status to alien-held. Human forces may subsequently retake a system, returning it to human-held status.
+
+### 3.13 Victory and Defeat
+
+- **FR-055:** Alien attacks shall diminish over time as a function of cumulative alien losses, representing exhaustion of the alien empire.
+- **FR-056:** The human player wins if alien attacks cease (alien exhaustion is reached) while Earth remains human-held and a sufficient number of human systems are retained. The exact threshold shall be a named, tunable constant.
+- **FR-057:** The alien bot wins if it captures Earth, or if it captures a sufficient number of human systems before alien exhaustion. The exact threshold shall be a named, tunable constant.
+- **FR-058:** When a victory or defeat condition is reached, the system shall pause the game and display a game-over screen identifying the outcome.
+
+### 3.14 Save and Load
+
+- **FR-059:** The player shall be able to save the current game state at any time during play.
+- **FR-060:** The player shall be able to load a previously saved game, restoring all game state including the event log, all forces, all system statuses, and the game clock.
+- **FR-061:** The system shall support at least one save slot. Multiple save slots are not required for the initial version.
+
+### 3.15 Bot API
+
+- **FR-062:** The alien bot shall interact with the game engine exclusively through a defined programmatic API. No bot logic shall be embedded directly in the game engine.
+- **FR-063:** The bot API shall expose, at minimum: the ability to query current (ground-truth) game state, the ability to issue movement orders for alien forces, and the ability to receive notification of game events.
+- **FR-064:** The bot API shall be designed so that an alternative bot implementation (including a future reinforcement-learning agent) can be substituted by replacing a single module, with no changes to the game engine.
 
 ---
 
@@ -61,37 +142,57 @@ Star Tank is a single-page web application that renders an interactive 3D visual
 
 - **NFR-001:** The application shall run entirely in a modern desktop web browser (Chrome, Firefox, or Safari, current versions) with no browser plugins required.
 - **NFR-002:** The Go server shall start and be ready to serve requests within 2 seconds of launch on a typical developer laptop.
-- **NFR-003:** Mouseover detection and label/line rendering shall appear instantaneous to the user (no perceptible lag on a modern laptop).
-- **NFR-004:** The application shall not require an internet connection at runtime; all assets (including the Three.js library) shall be either embedded or served locally.
+- **NFR-003:** The game simulation shall run in real time without perceptible stuttering or lag on a modern developer laptop.
+- **NFR-004:** The application shall not require an internet connection at runtime; all assets (including the Three.js library) shall be embedded or served locally.
+- **NFR-005:** All tunable game parameters (time scale, ship speed, economic rates, weapon costs, victory thresholds) shall be defined as named constants in a single location in the code to facilitate gameplay tuning.
+- **NFR-006:** The application is intended for single-user local use only. No authentication, HTTPS, or multi-user support is required.
 
 ---
 
 ## 5. Data Requirements
 
-### 5.1 Source File
-- File: `/Users/Jeff/nearest.csv`
-- 108 star records (plus Sol)
-- Fields used: RA (HH MM SS.s), Dec (±DD MM SS), Distance (light-years), catalog name, common name
+### 5.1 Source Files
 
-### 5.2 Derived Data (embedded in JS)
-Each record stored in JavaScript shall contain:
+| File | Contents |
+|------|----------|
+| `nearest.csv` | ~108 star records: RA, Dec, distance, catalog name, common name |
+| `planets.csv` | Planet records keyed to stars in `nearest.csv` |
+
+### 5.2 Star System Entity
+
+Each star system in the game shall maintain:
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `x, y, z` | float | Light-years, computed from RA/Dec/distance |
-| `catalogName` | string | GJ designation or equivalent |
-| `commonName` | string or null | Human-readable name, if present in CSV |
-| `displayName` | string | Common name if available, else catalog name; for co-located groups, all applicable names |
+| `id` | string | Catalog name or GJ designation |
+| `displayName` | string | Common name if available, else catalog name |
+| `position` | (x, y, z) float | Light-years from Sol, computed at startup |
+| `economicLevel` | int 1–5 | Initialized at game start, may change |
+| `accumulatedOutput` | float | Economic output available for construction |
+| `status` | enum | human-held, alien-held, contested, uninhabited |
+| `forcesPresent` | list | Fleets and local weapon counts |
+| `lastKnownState` | struct | Most recent state received at Earth, with timestamp |
 
-### 5.3 Volume
-- ~108 star records. No database or persistence layer is needed.
+### 5.3 Event Log Entry
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `eventYear` | float | In-universe year the event occurred |
+| `arrivalYear` | float | In-universe year info reaches Earth |
+| `systemId` | string | Star system where event occurred |
+| `eventType` | enum | combat, construction, arrival, reporter-return, command-failed, alien-attack |
+| `details` | struct | Event-type-specific payload |
+
+### 5.4 Volume
+
+- ~108 star systems. No database required; all state held in server memory and persisted to a save file on demand.
 
 ---
 
 ## 6. Integration Requirements
 
-- **IR-001:** The client page shall use the **Three.js** library for 3D rendering and OrbitControls for camera navigation. The library shall be served locally (bundled or copied into the project) so no CDN access is required at runtime.
-- No other external integrations are required.
+- **IR-001:** The client shall use the Three.js library for 3D rendering and OrbitControls for camera navigation. The library shall be served locally.
+- **IR-002:** No other external integrations are required.
 
 ---
 
@@ -100,36 +201,52 @@ Each record stored in JavaScript shall contain:
 ### Constraints
 - Server language: Go, standard library only (no third-party Go packages).
 - Frontend rendering: Three.js (no other 3D framework).
-- Server port: 8080 (fixed).
-- This is a **prototype only** — no production hardening, authentication, or scalability measures are required.
+- Server port: 8080, localhost only.
+- Single-player local application; no network play, no authentication.
+- The existing prototype code in `Proto/` may be used as a foundation but will require significant extension.
 
 ### Assumptions
-- The developer runs the server locally; there is no need for HTTPS or CORS handling.
-- The CSV file is a one-time data source; the data is baked into the JS at development time and does not need to be re-read at runtime.
-- "No animation" means no time-driven scene updates; OrbitControls-driven camera movement and mouseover-driven element appearance/disappearance are not considered animation for this purpose.
-- The coordinate system orientation (x toward RA=0h Dec=0°, z toward north celestial pole) is acceptable for prototype evaluation purposes.
+- The player is always logically located at Earth (Sol). All information delays are computed relative to Sol.
+- Relativistic time dilation effects on crew or ships are not modeled; only signal/command travel delay is simulated.
+- The alien bot has access to ground-truth game state (it "knows" what is happening everywhere); only the human player is subject to information delay.
+- Star positions are static; stellar motion over game timescales is not modeled.
+- Economic levels do not change during normal play unless altered by game events (e.g., a captured system).
 
 ---
 
 ## 8. MVP Scope
 
-All requirements listed above constitute the MVP. The full set is:
+The following requirements constitute the minimum viable game — a playable session with core mechanics functioning:
 
-`FR-001` through `FR-020`, `NFR-001` through `NFR-004`, `IR-001`
+**Must have for MVP:**
+`FR-001` – `FR-016` (server, initialization, time, event log core)
+`FR-019` – `FR-024` (star map display)
+`FR-025` – `FR-028` (event sidebar)
+`FR-029` – `FR-039` (player actions: construction and fleet command)
+`FR-040` – `FR-048` (forces and economics)
+`FR-049` – `FR-054` (combat)
+`FR-055` – `FR-058` (victory/defeat)
+`FR-062` – `FR-064` (bot API)
+`NFR-001` – `NFR-005`
 
-The prototype is intentionally minimal. The following are explicitly **out of scope** for this phase:
-- Varying star appearance by spectral type, magnitude, or mass
-- Any legend, grid, numeric axis labels, tick marks, or scale indicators on the axis lines
-- Clickable stars or any interaction beyond hover
-- Mobile or touch support
-- Multiple views or UI controls (no buttons, sliders, etc.)
+**Deferred post-MVP:**
+- `FR-059` – `FR-061` (save/load) — important but not required for first playable
+- Multiple save slots
+- Varying star marker appearance by spectral type or magnitude
+- Touch/mobile support
+- Two-player or networked play
 
 ---
 
 ## 9. Open Questions
 
-- **OQ-001:** ~~Resolved.~~ See FR-019.
-- **OQ-002:** If the prototype evaluation result is "yes" — what game genre/mechanic is envisioned? (Deferred by design; captured here for continuity.)
+- **OQ-001:** What are the exact numerical thresholds for victory/defeat (number of systems, percentage of economic output captured, etc.)? To be determined from early gameplay. See FR-056, FR-057.
+- **OQ-002:** What is the exact shape of the Gaussian distribution for initial economic levels? Parameters (mean, standard deviation, clamping) to be tuned in code.
+- **OQ-003:** Does alien exhaustion accelerate smoothly with alien losses, or does it trigger at threshold events? Mechanics to be refined from gameplay.
+- **OQ-004:** When a player issues a fleet command to a system that already has orders en route, do the new orders supersede the old ones, queue behind them, or require the player to cancel? To be designed.
+- **OQ-005:** What visual treatment distinguishes the "stale" information state from "current" information on the star map — e.g., faded color, italic label, a timestamp indicator?
+- **OQ-006:** Should the game support difficulty levels (affecting bot aggressiveness or alien exhaustion rate) in the initial version, or is a single difficulty sufficient?
+- **OQ-007:** Are there any weapon types beyond the initial five that should be added to the hierarchy before first play? The original design had a larger hierarchy; to be revisited after early gameplay.
 
 ---
 
@@ -137,12 +254,18 @@ The prototype is intentionally minimal. The following are explicitly **out of sc
 
 | Term | Definition |
 |------|------------|
-| **Tank** | In science fiction, a three-dimensional holographic or physical display showing nearby space, ship positions, and star systems. |
-| **RA (Right Ascension)** | The celestial equivalent of longitude, measured in hours, minutes, and seconds eastward along the celestial equator. |
-| **Dec (Declination)** | The celestial equivalent of latitude, measured in degrees north (+) or south (−) of the celestial equator. |
-| **Equatorial-to-Cartesian conversion** | The standard transformation from (RA, Dec, distance) spherical coordinates to (x, y, z) Cartesian coordinates, with x pointing toward RA=0h/Dec=0°, y toward RA=6h/Dec=0°, and z toward the north celestial pole. |
-| **Co-located stars** | Two or more stars (typically a binary pair) whose RA, Dec, and distance are identical in the source data, resulting in the same computed Cartesian position. |
-| **OrbitControls** | A Three.js add-on that allows the user to orbit, zoom, and pan a 3D scene using mouse input. |
-| **Sol** | The proper name for Earth's sun, used in this application as the permanent label for the star at the origin. |
-| **Light-year** | The distance light travels in one year, approximately 9.461 × 10¹² km. Used as the unit of distance throughout this application. |
-| **Prototype** | A minimal working implementation built solely to evaluate visual suitability, not intended for production use. |
+| **Bot** | The software agent that controls the alien side of the game. |
+| **Bot API** | The programmatic interface through which the bot interacts with the game engine. |
+| **Economic Level** | An integer 1–5 representing the industrial and population capacity of a star system. Level 5 approaches Kardashev Type II. |
+| **Earth-arrival year** | The in-universe year at which information about a distant event would reach Sol, computed as event year + (distance ÷ speed of light). |
+| **Event Log** | The server's authoritative, ground-truth record of all game events, timestamped in pulsar-calibrated in-universe years. |
+| **Fleet** | A named group of interstellar-capable ships traveling or stationed together. |
+| **Interceptor** | A local combat vessel with no interstellar drive. |
+| **Kardashev Level** | A scale of civilizational energy use. Level 2 represents full utilization of a star's output. |
+| **Light-travel delay** | The time required for information or a command to travel from Sol to a distant star system at the speed of light. |
+| **Orbital Defense** | Automated local defensive weapons, analogous to close-in weapon systems (CIWS). |
+| **Pulsar time** | A universal time standard synchronized across human space using millisecond pulsars, allowing consistent timestamping despite the lack of FTL communication. |
+| **Reporter** | An unarmed interstellar vessel that automatically returns to Earth to report combat events. |
+| **Sol** | Earth's sun, located at the origin (0, 0, 0) of the star map. The player's logical location throughout the game. |
+| **Star Tank** | In science fiction, a three-dimensional display showing nearby space and star systems, as found on the bridge of a starship. |
+| **0.8c** | The default travel speed of interstellar-capable vessels: 80% of the speed of light. A tunable constant. |
