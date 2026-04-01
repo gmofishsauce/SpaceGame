@@ -21,6 +21,7 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 | **FR-002** | The server responds to `GET /` with a single HTML page; all CSS and JavaScript are bundled into that response (no separate file downloads after initial load). |
 | **FR-003** | The server uses only the Go standard library; no third-party Go packages. |
 | **FR-004** | The server is the sole source of truth for game state; the client is a display and input device only. |
+| **FR-004a** | In addition to serving the SPA at `/`, the server presents a REST/SSE API under `/api` that is the authoritative source of game state for all clients. This design permits multiple simultaneous clients (e.g., a browser tab and a standalone bot program); the game engine does not distinguish between them. |
 
 ### 2.2 Game Initialization
 
@@ -46,9 +47,9 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 
 | ID | Requirement |
 |----|-------------|
-| **FR-015** | Every game event (combat, construction completion, fleet arrival, system capture, failed command, alien attack) is recorded in a server-side event log with its in-game year and origin system. |
-| **FR-016** | For each event the server computes the earliest year it could reach Earth. Standard events propagate at c (1 LY/year): `arrivalYear = eventYear + dist(system, Sol)`. Combat events reported by a Reporter vessel propagate at 0.8c: `arrivalYear = eventYear + dist(system, Sol) / 0.8`. |
-| **FR-017** | The player UI only shows events whose `arrivalYear ≤ currentGameYear`. |
+| **FR-015** | Every game event (combat, construction completion, fleet arrival, system capture, command arrival, command outcome, alien attack) is recorded in a server-side event log with its in-game year and origin system. The arrival of a command at a distant system is itself a logged event. The outcome of that command is a separate logged event with one of three results: ignored (e.g., system was already captured), impossible (e.g., insufficient wealth), or executed. All three outcome types are logged. |
+| **FR-016** | Events are not inherently visible at Sol; only *reported* events reach the player. An event is reportable if, at the time it occurs in the local system frame, either (1) a Reporter vessel is present and escapes into relativistic flight toward Sol, or (2) an interstellar comm laser (see FR-040) is present in the system. Reporter-carried reports travel at 0.8c: `arrivalYear = eventYear + dist(system, Sol) / 0.8`. Comm-laser reports travel at c: `arrivalYear = eventYear + dist(system, Sol)`. The game log records a `canReport` flag on every event indicating which mechanism (if any) was available. |
+| **FR-017** | The player UI only shows **reported** events whose `arrivalYear ≤ currentGameYear`. Unreported events (those with no available reporting mechanism) are recorded in the internal game log but never appear in the player UI. |
 | **FR-018** | The displayed status of a star system is derived from the most recent event about that system whose `arrivalYear ≤ currentGameYear`. |
 
 ### 2.5 Star Map Display
@@ -75,11 +76,11 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 
 | ID | Requirement |
 |----|-------------|
-| **FR-029** | All player actions begin by right-clicking a star system to open a context menu. |
-| **FR-030** | The context menu only shows actions valid for the system's most recently known state. |
-| **FR-031** | Commands to non-Sol systems are delayed by `dist(Sol, system) / 0.8` in-game years before taking effect. Commands to Sol take effect immediately. |
-| **FR-032** | When presenting a construction or fleet-command dialog for a remote system, the UI displays projected state estimates at command-arrival time, not the current known state. |
-| **FR-033** | If a command arrives at its target system and cannot execute (e.g., system captured, insufficient output), a failed-execution event is logged and propagates to Earth at c. |
+| **FR-029** | All player commands originate from Sol. Right-clicking Sol opens an action context menu. Right-clicking any other star system opens a read-only status display showing best-known information about that system (based on reported events that have arrived at Sol); no commands may be issued from non-Sol systems. |
+| **FR-030** | The Sol context menu only shows actions valid given Sol's current state (construction if output is sufficient; fleet command if fleets are present). |
+| **FR-031** | Commands dispatched from Sol to a target system are delayed by `dist(Sol, system) / 0.8` in-game years before taking effect at the target. Commands targeting Sol itself take effect immediately. |
+| **FR-032** | When presenting a construction or fleet-command dialog, the UI displays projected state estimates at command-arrival time, not the current known state. |
+| **FR-033** | The arrival of a command at its target system is a logged event (FR-015). A separate logged event records the outcome: executed, impossible, or ignored. If impossible or ignored, the outcome event propagates to Earth using whatever reporting mechanism is available in the target system. |
 
 ### 2.8 Player Actions — Construction
 
@@ -101,7 +102,7 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 
 | ID | Requirement |
 |----|-------------|
-| **FR-040** | The system supports exactly five weapon types (ascending cost): Orbital Defense, Interceptor, Reporter, Escort, Battleship. See Section 7 for full stats. |
+| **FR-040** | The system supports exactly six weapon/device types (ascending cost): Orbital Defense, Interceptor, Reporter, Escort, Battleship, Comm Laser. See Section 7 for full stats. The Comm Laser has no combat attack value but ensures that all logged events in its system are reported to Sol at light speed (c). Comm lasers always report at least the initial arrival of alien forces, even if subsequently destroyed during the same combat; Reporters, by contrast, may be destroyed before they can flee and report nothing in that case. |
 | **FR-041** | All interstellar-capable ships travel at 0.8c. This speed is a named, tunable constant. |
 | **FR-042** | Interstellar-capable ships are grouped into named fleets; names are auto-assigned. |
 | **FR-043** | Each system tracks counts of each weapon type and which named fleets are present. |
@@ -111,21 +112,22 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 
 | ID | Requirement |
 |----|-------------|
-| **FR-045** | Each human-held system has an economic level 1–5. |
-| **FR-046** | Accumulated economic output grows continuously at a rate proportional to economic level; the accumulation rate per level is a named, tunable constant. |
-| **FR-047** | Construction deducts cost from accumulated output; orders are rejected if output is insufficient. |
-| **FR-048** | Economic levels are fixed in the MVP; they do not change during play. |
+| **FR-045** | Each human-held system has an economic level in the range [0, 5]. A newly human-held system starts at level 1; Sol is always level 5. |
+| **FR-046** | Each system accumulates *wealth* continuously at a rate of `2^econLevel` units per in-game year (level 0 = 1 unit/yr, level 5 = 32 units/yr). The accumulation rate formula is a named, tunable constant. |
+| **FR-047** | Construction deducts the weapon's wealth cost from the system's accumulated wealth; orders are rejected if accumulated wealth is insufficient. |
+| **FR-048** | Economic levels are dynamic. In the absence of combat, a system's economic level increases by 1 (up to the level-5 cap) every 100 in-game years. Any combat in a system immediately (a) reduces economic level by 1 (floor 0), (b) destroys a random fraction of its accumulated wealth, and (c) resets the system's 100-year growth clock. The growth interval is a named, tunable constant. |
 
 ### 2.12 Combat
 
 | ID | Requirement |
 |----|-------------|
 | **FR-049** | Combat occurs automatically whenever alien and human forces occupy the same system at the same game tick. |
-| **FR-050** | Combat is resolved stochastically by the game engine; the player has no real-time input. |
+| **FR-050** | Every weapon/device type has a *vulnerability* rating (low, medium, or high) and an *attacking power* rating (none, low, medium, or high). Combat is resolved stochastically using these ratings; the player has no real-time input. Combat results are binary: a unit is either destroyed or unaffected — there is no damage tracking. Vulnerability and attacking power are represented numerically as: none=0, low=1, medium=3, high=10. Hit probability for a single attacker against a single target is `attackPower / (attackPower + vulnerability)`. Ratings by type: Comm Laser — high vulnerability, no attacking power; Orbital Defense — high vulnerability, low attacking power; Reporter — medium vulnerability, no attacking power; Interceptor — medium vulnerability, medium attacking power; Escort — medium vulnerability, medium attacking power; Battleship — low vulnerability, high attacking power. |
 | **FR-051** | Combat occurs only within star systems, never during interstellar transit. |
-| **FR-052** | Every combat event is recorded in the server's internal event log, whether or not a Reporter is present. |
-| **FR-053** | Combat results propagate to Earth (appear in the player's sidebar) only if a Reporter vessel was present in the system at the time of combat. Without a Reporter, neither the occurrence nor outcome of combat reaches Earth directly. |
+| **FR-052** | Every combat event is recorded in the server's internal event log. |
+| **FR-053** | Combat results reach the player only via a reporting mechanism. If a Comm Laser is present in the system, it reports all events (including initial alien arrival) at light speed before any combat outcome. If a Reporter vessel is present at combat start, it flees immediately and carries the combat result at 0.8c. A Reporter may be preempted if it is destroyed before it can flee (subject to the parallel-round resolution in FR-050). Without either mechanism, combat generates no event visible to the player. |
 | **FR-054** | A system captured by alien forces becomes alien-held; it may be retaken to human-held. |
+| **FR-054a** | Combat is resolved in rounds. Each round is resolved in parallel: all surviving units on both sides fire simultaneously. A round ends with the removal of all units destroyed in that round. Combat continues until all units of one side (or both) are eliminated. It is possible for both sides to destroy each other in the same round. |
 
 ### 2.13 Victory and Defeat
 
@@ -175,8 +177,8 @@ This could mean (a) the median distance, or (b) `max_distance / 2`. This design 
 **A-2 — FR-009: "periphery of human space"**
 Undefined numerically. This design assumes: systems with `dist > PERIPHERY_FRACTION * maxDist` (see `constants.go`; default `PERIPHERY_FRACTION = 0.75`, i.e., dist > ~17 LY). At least two such systems are selected randomly as alien entry points per game.
 
-**A-3 — FR-016: Reporter vs. radio propagation**
-FR-016 distinguishes "events from a reporter vessel" (travel time = dist / 0.8c) from standard events. This design interprets it as: standard events (fleet arrivals, construction, system captures that *are observed*) propagate at c. Combat events (which require a physical reporter vessel to certify) propagate at 0.8c (reporter's travel speed). Reporter reports arrive *slightly later* than a radio message would, but carry certified combat details.
+**A-3 — FR-016: Reporter vs. comm laser propagation**
+Events are only visible at Sol if reported. Two reporting mechanisms exist: (1) a Comm Laser in the system sends all events at c (`arrivalYear = eventYear + dist`); (2) a Reporter vessel flees at combat start and carries the result at 0.8c (`arrivalYear = eventYear + dist / 0.8`). If both are present, the comm laser's report arrives first. If neither is available, no event reaches Sol. The `CanReport` flag on `GameEvent` records which mechanism (if any) was present at event time.
 
 **A-4 — FR-032: "projected estimates"**
 The requirements call for projected state at command-arrival time. For accumulated economic output, projection = `current_accum + econRate × commandTravelTime`. For system forces, projection is identical to current known state (no way to predict other orders in flight). The dialog will display both the projected output and a note that force projections may be outdated.
@@ -192,8 +194,8 @@ The VisionStatement lists weapons as: Orbital Defense → Reporters → Intercep
 
 ### Contradictions
 
-**C-1 — FR-048 vs. VisionStatement on economic levels changing**
-FR-048 says economic levels "do not change during normal play unless altered by game events." The VisionStatement says they "grow over time." For MVP, this design implements FR-048 (levels fixed), consistent with the MVP scope section which does not include economic growth. Economic level change in response to events (e.g., alien capture resets a system's economy) *is* required and is handled by capturing/retaking system logic.
+**C-1 — FR-048 (resolved): Economic levels are now dynamic**
+FR-048 has been updated (see Section 2.11). Economic levels rise over time (1 level per 100 in-game years without combat) and are penalized by combat. This is consistent with the VisionStatement. There is no longer a contradiction.
 
 ### Gaps
 
@@ -318,7 +320,7 @@ Redefined as: game clock display updates at ≥ 10 Hz in real time; Three.js ren
 1. `engine.Tick()` advances `GameState.Clock` by `YearsPerTick`
 2. Engine processes all pending commands whose `executeYear ≤ Clock`
 3. Engine checks for combat in any system (alien + human forces present)
-4. `economy.AccumulateOutput()` increments each system's `AccumOutput`
+4. `economy.AccumulateWealth()` increments each system's `Wealth`; `economy.AdvanceEconLevels()` grows levels where due
 5. Engine checks victory/defeat conditions
 6. `events.BroadcastMatured()` pushes newly-matured events (those whose `arrivalYear ≤ Clock`) to all SSE clients
 
@@ -366,8 +368,11 @@ const (
     FleetSpeedC   = 0.8  // fraction of c; LY per in-game year
     CommandSpeedC = 0.8  // same as fleet speed (FR-031)
 
-    // Economic output (output units per in-game year, indexed by level 0..5; index 0 unused)
-    // Level 1 = 1.0/yr, Level 2 = 2.0/yr, ..., Level 5 = 16.0/yr (geometric)
+    // Economic wealth accumulation rate: 2^level units per in-game year (level 0..5)
+    // Level 0 = 1/yr, Level 1 = 2/yr, ..., Level 5 = 32/yr
+
+    // Economic level growth: rises 1 level per N in-game years without combat
+    EconGrowthIntervalYears = 100.0
 
     // Initial economic level distribution
     EconLevelMean   = 2.5
@@ -393,16 +398,19 @@ const (
     BotTickCadence = 10
 )
 
-// EconOutputRate[level] = economic output units per in-game year. Index 0 unused.
-var EconOutputRate = [6]float64{0, 1.0, 2.0, 4.0, 8.0, 16.0}
+// EconWealthRate[level] = wealth units accumulated per in-game year = 2^level.
+var EconWealthRate = [6]float64{1.0, 2.0, 4.0, 8.0, 16.0, 32.0}
 
-// WeaponDefs defines all weapon type parameters.
+// WeaponDefs defines all weapon/device type parameters.
+// AttackPower and Vulnerability use: 0=none, 1=low, 3=medium, 10=high.
+// Hit probability = AttackPower / (AttackPower + Vulnerability); clamped to [0.05, 0.95].
 var WeaponDefs = map[WeaponType]WeaponDef{
-    WeaponOrbitalDefense: {Cost: 10,  MinLevel: 1, Attack: 2,  Defense: 4,  CanMove: false, Reports: false},
-    WeaponInterceptor:    {Cost: 25,  MinLevel: 2, Attack: 4,  Defense: 3,  CanMove: false, Reports: false},
-    WeaponReporter:       {Cost: 20,  MinLevel: 2, Attack: 0,  Defense: 1,  CanMove: true,  Reports: true},
-    WeaponEscort:         {Cost: 75,  MinLevel: 3, Attack: 6,  Defense: 4,  CanMove: true,  Reports: false},
-    WeaponBattleship:     {Cost: 200, MinLevel: 4, Attack: 12, Defense: 6,  CanMove: true,  Reports: false},
+    WeaponOrbitalDefense: {Cost: 1,  MinLevel: 1, AttackPower: 1,  Vulnerability: 10, CanMove: false, Reports: false, CommLaser: false},
+    WeaponInterceptor:    {Cost: 2,  MinLevel: 1, AttackPower: 3,  Vulnerability: 3,  CanMove: false, Reports: false, CommLaser: false},
+    WeaponReporter:       {Cost: 4,  MinLevel: 1, AttackPower: 0,  Vulnerability: 3,  CanMove: true,  Reports: true,  CommLaser: false},
+    WeaponEscort:         {Cost: 8,  MinLevel: 2, AttackPower: 3,  Vulnerability: 3,  CanMove: true,  Reports: false, CommLaser: false},
+    WeaponBattleship:     {Cost: 32, MinLevel: 3, AttackPower: 10, Vulnerability: 1,  CanMove: true,  Reports: false, CommLaser: false},
+    WeaponCommLaser:      {Cost: 64, MinLevel: 4, AttackPower: 0,  Vulnerability: 10, CanMove: false, Reports: false, CommLaser: true},
 }
 ```
 
@@ -447,20 +455,22 @@ const (
     WeaponReporter       WeaponType = "reporter"
     WeaponEscort         WeaponType = "escort"
     WeaponBattleship     WeaponType = "battleship"
+    WeaponCommLaser      WeaponType = "comm_laser"
 )
 
 // WeaponTypeOrder is the canonical display order (ascending cost).
 var WeaponTypeOrder = []WeaponType{
-    WeaponOrbitalDefense, WeaponInterceptor, WeaponReporter, WeaponEscort, WeaponBattleship,
+    WeaponOrbitalDefense, WeaponInterceptor, WeaponReporter, WeaponEscort, WeaponBattleship, WeaponCommLaser,
 }
 
 type WeaponDef struct {
-    Cost     float64  // economic output units
-    MinLevel int      // minimum system economic level to construct
-    Attack   int      // combat attack rating
-    Defense  int      // combat defense rating
-    CanMove  bool     // interstellar capable
-    Reports  bool     // triggers combat reporting to Earth when present
+    Cost          float64  // wealth units required to construct
+    MinLevel      int      // minimum system economic level to construct
+    AttackPower   int      // 0=none, 1=low, 3=medium, 10=high
+    Vulnerability int      // 1=low, 3=medium, 10=high
+    CanMove       bool     // interstellar capable
+    Reports       bool     // Reporter: flees at combat start and carries result at 0.8c
+    CommLaser     bool     // Comm laser: all events in system reported to Sol at c
 }
 
 type EventType string
@@ -533,15 +543,17 @@ type StarSystem struct {
 
     // Ground truth (authoritative, only engine writes these)
     Status          SystemStatus
-    EconLevel       int          // 0 for uninhabited/alien-held
-    AccumOutput     float64
-    LocalUnits      map[WeaponType]int  // stationary units (OrbitalDefense, Interceptor)
+    EconLevel       int          // 0 for uninhabited/alien-held; grows over time (FR-048)
+    Wealth          float64      // accumulated wealth; deducted by construction
+    EconGrowthYear  float64      // game year at which next level-up occurs (reset on combat)
+    LocalUnits      map[WeaponType]int  // stationary units (OrbitalDefense, Interceptor, CommLaser)
     FleetIDs        []string            // IDs of fleets currently present
 
-    // Last known state (derived from events with arrivalYear ≤ currentClock)
+    // Last known state (derived from reported events with arrivalYear ≤ currentClock)
     KnownStatus     SystemStatus
     KnownAsOfYear   float64
     KnownEconLevel  int
+    KnownWealth     float64
     KnownLocalUnits map[WeaponType]int
     KnownFleetIDs   []string
 }
@@ -561,11 +573,12 @@ type Fleet struct {
 type GameEvent struct {
     ID          string
     EventYear   float64
-    ArrivalYear float64      // math.MaxFloat64 if event never reaches Earth
+    ArrivalYear float64      // math.MaxFloat64 if event never reaches Earth (unreported)
     SystemID    string
     Type        EventType
     Description string
     Broadcast   bool         // true once pushed to SSE clients
+    CanReport   bool         // true if a reporting mechanism existed at event time
     Details     interface{}  // type-specific payload (see Section 7)
 }
 
@@ -767,8 +780,9 @@ tick(state):
             logCommandFailed(state, cmd, err)
         remove cmd from state.PendingCmds
 
-    // Accumulate economic output (FR-046)
-    economy.AccumulateOutput(state, YearsPerTick)
+    // Accumulate wealth and advance economic levels (FR-046, FR-048)
+    economy.AccumulateWealth(state, YearsPerTick)
+    economy.AdvanceEconLevels(state)
 
     // Check for combat (FR-049)
     for each system in state.Systems:
@@ -814,7 +828,7 @@ tick(state):
 
 **Purpose**: Stochastic combat resolution.
 
-**Satisfies**: FR-049, FR-050, FR-051, FR-052, FR-053, FR-054
+**Satisfies**: FR-049, FR-050, FR-051, FR-052, FR-053, FR-054, FR-054a
 
 **Interface**:
 
@@ -835,7 +849,19 @@ Resolve(state, sys):
 
     if len(humanUnits) == 0 || len(alienUnits) == 0: return
 
-    // Check for and extract Reporters before combat (they flee immediately)
+    // Step 1: Comm Laser reporting (before any combat; laser reports alien arrival at c)
+    hasCommLaser = sys.LocalUnits[WeaponCommLaser] > 0
+    if hasCommLaser:
+        commEvt = &GameEvent{
+            EventYear:   state.Clock,
+            ArrivalYear: state.Clock + sys.DistFromSol,  // at c
+            SystemID:    sys.ID,
+            Type:        EventAlienArrival,
+            Description: "Alien forces detected by comm laser",
+        }
+        state.RecordEvent(commEvt)
+
+    // Step 2: Check for and extract Reporters before combat (they flee immediately)
     reportersFled = false
     for each humanFleet in sys with Reporter units:
         reportersFled = true
@@ -844,35 +870,41 @@ Resolve(state, sys):
         state.Fleets[departing.ID] = departing
         remove reporter units from humanFleet
 
-    // Round-based combat
+    // Step 3: Round-based parallel combat
     rng = rand.New(rand.NewSource(time.Now().UnixNano()))
     maxRounds = 20  // safety cap
     for round = 0; round < maxRounds && len(humanUnits) > 0 && len(alienUnits) > 0; round++:
-        // Each human unit fires at a random alien unit
-        for each attacker in humanUnits (shuffle order):
+        toDestroyHuman = []
+        toDestroyAlien = []
+
+        // All units on both sides fire simultaneously; collect casualties
+        for each attacker in humanUnits:
             target = randomAlienUnit(alienUnits, rng)
-            p = hitProbability(attacker, target)  // Attack / (Attack + Defense)
+            p = hitProbability(attacker, target)  // AttackPower / (AttackPower + Vulnerability)
             if rng.Float64() < p:
-                eliminate(target from alienUnits)
+                toDestroyAlien = append(toDestroyAlien, target)
                 state.Alien.TotalLost++
 
-        // Each surviving alien unit fires at a random human unit
-        for each attacker in alienUnits (shuffle order):
+        for each attacker in alienUnits:
             target = randomHumanUnit(humanUnits, rng)
             p = hitProbability(attacker, target)
             if rng.Float64() < p:
-                eliminate(target from humanUnits)
+                toDestroyHuman = append(toDestroyHuman, target)
+
+        // Remove all casualties at end of round (parallel resolution)
+        eliminate(toDestroyAlien from alienUnits)
+        eliminate(toDestroyHuman from humanUnits)
 
     // Determine outcome
     humanWon = len(alienUnits) == 0 && len(humanUnits) > 0
     alienWon = len(humanUnits) == 0 && len(alienUnits) > 0
     draw     = len(humanUnits) == 0 && len(alienUnits) == 0
 
-    // Apply outcome to system
+    // Apply outcome to system; apply economic penalty for any combat (FR-048)
+    applyEconomicCombatPenalty(state, sys)   // reduce level by 1, destroy random wealth fraction, reset growth clock
     if alienWon || draw:
         sys.Status = StatusAlien
         clearHumanForces(sys)
-        sys.EconLevel = 0
     if humanWon:
         sys.Status = StatusHuman
         clearAlienForces(sys)
@@ -880,33 +912,30 @@ Resolve(state, sys):
     // Write-back surviving unit counts to sys (from unit slices)
     reconcileForces(sys, humanUnits, alienUnits)
 
-    // Log events (FR-052, FR-053)
-    silentEvt = &GameEvent{
-        EventYear:   state.Clock,
-        ArrivalYear: math.MaxFloat64,   // never reaches Earth
-        SystemID:    sys.ID,
-        Type:        EventCombatSilent,
-        Description: summarizeCombat(humanWon, alienWon, draw, casualties),
-    }
-    state.RecordEvent(silentEvt)
+    // Log internal event (always; FR-052)
+    canReport = hasCommLaser || reportersFled
+    arrYear = math.MaxFloat64
+    if hasCommLaser:
+        arrYear = state.Clock + sys.DistFromSol          // at c
+    else if reportersFled:
+        arrYear = state.Clock + sys.DistFromSol / FleetSpeedC  // at 0.8c
 
-    if reportersFled:
-        // Reporter will carry the combat result; arrivalYear set on reporter fleet
-        reportEvt = &GameEvent{
-            EventYear:   state.Clock,
-            ArrivalYear: state.Clock + sys.DistFromSol / FleetSpeedC,  // 0.8c travel
-            SystemID:    sys.ID,
-            Type:        EventCombatOccurred,
-            Description: summarizeCombat(humanWon, alienWon, draw, casualties),
-        }
-        state.RecordEvent(reportEvt)
+    combatEvt = &GameEvent{
+        EventYear:   state.Clock,
+        ArrivalYear: arrYear,
+        SystemID:    sys.ID,
+        Type:        EventCombatOccurred,  // unreported if arrYear == MaxFloat64
+        Description: summarizeCombat(humanWon, alienWon, draw, casualties),
+        CanReport:   canReport,
+    }
+    state.RecordEvent(combatEvt)
 ```
 
 **`hitProbability(attacker, target)`**:
 ```
-p = float64(WeaponDefs[attacker.Type].Attack) /
-    float64(WeaponDefs[attacker.Type].Attack + WeaponDefs[target.Type].Defense)
-// clamped to [0.05, 0.95] to avoid guaranteed hits/misses
+p = float64(WeaponDefs[attacker.Type].AttackPower) /
+    float64(WeaponDefs[attacker.Type].AttackPower + WeaponDefs[target.Type].Vulnerability)
+// clamped to [0.05, 0.95]; units with AttackPower==0 always return 0.0 (no clamp applied)
 ```
 
 **Unit representation during combat**: A unit is `struct { Type WeaponType; Owner Owner }`. Slices are built by expanding `map[WeaponType]int` into individual unit structs. This makes round-by-round elimination straightforward.
@@ -928,8 +957,16 @@ p = float64(WeaponDefs[attacker.Type].Attack) /
 ```go
 package game
 
-// AccumulateOutput adds output to each human-held system proportional to deltaYears.
-func AccumulateOutput(state *GameState, deltaYears float64)
+// AccumulateWealth adds wealth to each human-held system proportional to deltaYears.
+func AccumulateWealth(state *GameState, deltaYears float64)
+
+// AdvanceEconLevels checks and applies economic level growth for each system.
+// Called on every engine tick.
+func AdvanceEconLevels(state *GameState)
+
+// ApplyEconomicCombatPenalty reduces econ level by 1, destroys a random fraction
+// of wealth, and resets the growth clock. Called by combat.Resolve on every combat.
+func ApplyEconomicCombatPenalty(state *GameState, sys *StarSystem)
 
 // ValidateConstruct checks whether a construction command can execute.
 // Returns nil if valid, error describing the rejection reason if not.
@@ -938,31 +975,43 @@ func ValidateConstruct(sys *StarSystem, wt WeaponType, qty int) error
 // ExecuteConstruct applies an approved construction order to the system.
 func ExecuteConstruct(state *GameState, sys *StarSystem, wt WeaponType, qty int)
 
-// ProjectedOutput returns estimated accumulated output at futureYear,
-// given current output and the system's econ level.
-func ProjectedOutput(sys *StarSystem, futureYear float64) float64
+// ProjectedWealth returns estimated accumulated wealth at futureYear,
+// given current wealth and the system's econ level.
+func ProjectedWealth(sys *StarSystem, futureYear float64) float64
 ```
 
 **Behavior**:
 
 ```
-AccumulateOutput(state, deltaYears):
+AccumulateWealth(state, deltaYears):
     for each sys in state.Systems where sys.Status == StatusHuman:
-        sys.AccumOutput += EconOutputRate[sys.EconLevel] * deltaYears
+        sys.Wealth += EconWealthRate[sys.EconLevel] * deltaYears
+
+AdvanceEconLevels(state):
+    for each sys in state.Systems where sys.Status == StatusHuman:
+        if sys.EconLevel < 5 && state.Clock >= sys.EconGrowthYear:
+            sys.EconLevel++
+            sys.EconGrowthYear = state.Clock + EconGrowthIntervalYears
+
+ApplyEconomicCombatPenalty(state, sys):
+    if sys.EconLevel > 0:
+        sys.EconLevel--
+    sys.Wealth *= rand.Float64() * 0.5   // destroy 0–50% of wealth (random)
+    sys.EconGrowthYear = state.Clock + EconGrowthIntervalYears  // reset clock
 
 ValidateConstruct(sys, wt, qty):
     def = WeaponDefs[wt]
     if sys.EconLevel < def.MinLevel:
         return error("economic level %d required, system has %d", def.MinLevel, sys.EconLevel)
     totalCost = def.Cost * float64(qty)
-    if sys.AccumOutput < totalCost:
-        return error("insufficient output: need %.1f, have %.1f", totalCost, sys.AccumOutput)
+    if sys.Wealth < totalCost:
+        return error("insufficient wealth: need %.1f, have %.1f", totalCost, sys.Wealth)
     return nil
 
 ExecuteConstruct(state, sys, wt, qty):
     def = WeaponDefs[wt]
-    sys.AccumOutput -= def.Cost * float64(qty)
-    if WeaponDefs[wt].CanMove:
+    sys.Wealth -= def.Cost * float64(qty)
+    if def.CanMove:
         // Create a fleet for interstellar-capable units
         fleet = &Fleet{
             ID: state.NewFleetID(), Name: state.NewFleetName(),
@@ -974,18 +1023,22 @@ ExecuteConstruct(state, sys, wt, qty):
         sys.FleetIDs = append(sys.FleetIDs, fleet.ID)
     else:
         sys.LocalUnits[wt] += qty
-    // Log construction complete event (propagates at c)
+    // Log construction complete event; reportable only if system has a comm laser
+    hasCommLaser = sys.LocalUnits[WeaponCommLaser] > 0
+    arrYear = math.MaxFloat64
+    if hasCommLaser:
+        arrYear = state.Clock + sys.DistFromSol
     evt = &GameEvent{
-        EventYear: state.Clock, ArrivalYear: state.Clock + sys.DistFromSol,
+        EventYear: state.Clock, ArrivalYear: arrYear,
         SystemID: sys.ID, Type: EventConstructionDone,
         Description: fmt.Sprintf("Constructed %d %s", qty, wt),
+        CanReport: hasCommLaser,
     }
     state.RecordEvent(evt)
 
-ProjectedOutput(sys, futureYear):
-    // futureYear is the year the command arrives
+ProjectedWealth(sys, futureYear):
     deltaYears = futureYear - currentClock   // approximate
-    return sys.AccumOutput + EconOutputRate[sys.EconLevel] * deltaYears
+    return sys.Wealth + EconWealthRate[sys.EconLevel] * deltaYears
 ```
 
 **Error handling**: `ValidateConstruct` returns descriptive errors; callers log these as `command_failed` events. `ExecuteConstruct` panics if called with an invalid weapon type (programming error, not a runtime error).
@@ -1526,7 +1579,7 @@ renderer.domElement.addEventListener('contextmenu', (e) => {
 
 **Construction dialog** (`showConstructDialog(star)`):
 1. Compute `commandTravelYears = star.distFromSol / COMMAND_SPEED_C` (displayed to player).
-2. Compute `projectedOutput = state.getProjectedOutput(star.id, commandTravelYears)`.
+2. Compute `projectedWealth = state.getProjectedWealth(star.id, commandTravelYears)`.
 3. Show modal with weapon type table: Name, Cost, Min Level, "Can Build?" (checked if econ level ≥ min and projected output ≥ cost).
 4. On confirm: `POST /api/command` with `{type:"construct", systemId, weaponType, quantity:1}`.
 5. Quantity is always 1 in MVP (dialog shows one unit at a time).
@@ -1666,11 +1719,11 @@ export class ClientState {
 
     getKnownStatus(systemId) { return this.systems[systemId]?.knownStatus ?? 'unknown' }
     getKnownState(systemId)  { return this.systems[systemId] }
-    getProjectedOutput(systemId, deltaYears) {
+    getProjectedWealth(systemId, deltaYears) {
         const sys = this.systems[systemId]
         if (!sys) return 0
-        const rate = ECON_OUTPUT_RATE[sys.knownEconLevel] ?? 0
-        return (sys.knownAccumOutput ?? 0) + rate * deltaYears
+        const rate = ECON_WEALTH_RATE[sys.knownEconLevel] ?? 0
+        return (sys.knownWealth ?? 0) + rate * deltaYears
     }
 }
 ```
@@ -1697,15 +1750,17 @@ export const STATUS_COLORS = {
 }
 export const SOL_COLOR = 0xffff88
 
-export const ECON_OUTPUT_RATE = [0, 1.0, 2.0, 4.0, 8.0, 16.0]
+// EconWealthRate[level] = wealth units per in-game year = 2^level (indices 0..5)
+export const ECON_WEALTH_RATE = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
 
 // Mirrored weapon defs for UI display (costs and min levels)
 export const WEAPON_DEFS = {
-    orbital_defense: { displayName: 'Orbital Defense', cost: 10,  minLevel: 1 },
-    interceptor:     { displayName: 'Interceptor',     cost: 25,  minLevel: 2 },
-    reporter:        { displayName: 'Reporter',         cost: 20,  minLevel: 2 },
-    escort:          { displayName: 'Escort',           cost: 75,  minLevel: 3 },
-    battleship:      { displayName: 'Battleship',       cost: 200, minLevel: 4 },
+    orbital_defense: { displayName: 'Orbital Defense', cost: 1,  minLevel: 1 },
+    interceptor:     { displayName: 'Interceptor',     cost: 2,  minLevel: 1 },
+    reporter:        { displayName: 'Reporter',         cost: 4,  minLevel: 1 },
+    escort:          { displayName: 'Escort',           cost: 8,  minLevel: 2 },
+    battleship:      { displayName: 'Battleship',       cost: 32, minLevel: 3 },
+    comm_laser:      { displayName: 'Comm Laser',       cost: 64, minLevel: 4 },
 }
 ```
 
@@ -1883,7 +1938,7 @@ The conversion is applied in `loader.go` using the same formula as `tools/gendat
 | FR-029 | 6.15, 6.17 | `web/src/starmap.js` (right-click), `web/src/ui.js` (context menu) |
 | FR-030 | 6.17 | `web/src/ui.js` (`showContextMenu` filtering) |
 | FR-031 | 6.5, 6.11 | `internal/game/engine.go`, `internal/server/handlers.go` |
-| FR-032 | 6.17, 6.19 | `web/src/ui.js`, `web/src/state.js` (`getProjectedOutput`) |
+| FR-032 | 6.17, 6.19 | `web/src/ui.js`, `web/src/state.js` (`getProjectedWealth`) |
 | FR-033 | 6.5, 6.8 | `internal/game/engine.go`, `internal/game/events.go` |
 | FR-034 | 6.17 | `web/src/ui.js` (`showContextMenu`) |
 | FR-035 | 6.17 | `web/src/ui.js` (`showConstructDialog`) |
@@ -1891,15 +1946,17 @@ The conversion is applied in `loader.go` using the same formula as `tools/gendat
 | FR-037 | 6.17 | `web/src/ui.js` (`showContextMenu`) |
 | FR-038 | 6.17 | `web/src/ui.js` (`showFleetCommandDialog`) |
 | FR-039 | 6.5, 6.11 | `internal/game/engine.go`, `internal/server/handlers.go` |
-| FR-040 | 6.1, 7.1 | `internal/game/constants.go`, `internal/game/types.go` |
+| FR-040 | 6.1, 6.2, 7.1 | `internal/game/constants.go`, `internal/game/types.go` (WeaponCommLaser added) |
 | FR-041 | 6.1 | `internal/game/constants.go` (`FleetSpeedC`) |
 | FR-042 | 6.3 | `internal/game/state.go` (`NewFleetName`) |
 | FR-043 | 6.3 | `internal/game/state.go` (`StarSystem.LocalUnits`, `StarSystem.FleetIDs`) |
 | FR-044 | 6.1 | `internal/game/constants.go` (`WeaponDefs[].MinLevel`) |
 | FR-045 | 6.3 | `internal/game/state.go` (`StarSystem.EconLevel`) |
-| FR-046 | 6.7 | `internal/game/economy.go` (`AccumulateOutput`) |
+| FR-046 | 6.7 | `internal/game/economy.go` (`AccumulateWealth`) |
 | FR-047 | 6.7 | `internal/game/economy.go` (`ValidateConstruct`, `ExecuteConstruct`) |
-| FR-048 | §4 Assumptions | (EconLevel not modified except by capture/retake) |
+| FR-004a | 6.10, 6.11 | `internal/server/server.go`, `internal/server/handlers.go` |
+| FR-048 | 6.7 | `internal/game/economy.go` (`AdvanceEconLevels`, `ApplyEconomicCombatPenalty`) |
+| FR-054a | 6.6 | `internal/game/combat.go` (parallel round resolution) |
 | FR-049 | 6.5, 6.6 | `internal/game/engine.go`, `internal/game/combat.go` |
 | FR-050 | 6.6 | `internal/game/combat.go` |
 | FR-051 | 6.5 | `internal/game/engine.go` (combat check only on stationed forces) |
@@ -1932,7 +1989,7 @@ The conversion is applied in `loader.go` using the same formula as `tools/gendat
 | Module | Test Cases |
 |--------|-----------|
 | `loader.go` | Load valid CSVs → correct system count (~108); Sol at (0,0,0); co-located stars grouped; Earth economic level = 5; systems with planets → human-held; systems within half max dist, no planets → human-held; systems beyond half max dist, no planets → uninhabited. |
-| `economy.go` | `AccumulateOutput` over 1 year at each level matches `EconOutputRate`; `ValidateConstruct` rejects if econ level < min; rejects if insufficient output; `ExecuteConstruct` deducts correct cost; `ProjectedOutput` matches manual calculation. |
+| `economy.go` | `AccumulateWealth` over 1 year at each level matches `EconWealthRate` (2^level); `AdvanceEconLevels` increments level after 100 game years and resets clock; `ApplyEconomicCombatPenalty` reduces level, reduces wealth, resets clock; `ValidateConstruct` rejects if econ level < min; rejects if insufficient wealth; `ExecuteConstruct` deducts correct cost; `ProjectedWealth` matches manual calculation. |
 | `combat.go` | 100 humans vs 0 aliens → no combat; zero humans: aliens win; equal forces: stochastic outcome (run N=1000, check both sides win ≥ 5% of the time); Reporter present → `EventCombatOccurred` logged with finite `arrivalYear`; no Reporter → `EventCombatSilent` logged with `arrivalYear = MaxFloat64`. |
 | `state.go` | `UpdateKnownStates` at year T only applies events with `arrivalYear ≤ T`; `CheckVictory` returns human win when conditions met; returns alien win on Earth capture; returns false when neither. |
 | `loader.go` (Gaussian) | Run 10,000 samples, verify all results in [1,5], mean within 0.1 of 2.5. |

@@ -1,5 +1,8 @@
 # Requirements: SpaceGame
 
+> **OBSOLETE — retained for historical reference only.**
+> `design.md` is the authoritative developer reference and supersedes this document.
+
 ## 1. Overview
 
 SpaceGame is a single-player, real-time interstellar strategy game served as a single-page web application on localhost. The player commands humanity's defenses against an alien invasion across the ~108 nearest star systems, operating from Earth under a strict limited-information constraint: all data arrives and all commands travel at the speed of light. A built-in bot drives the alien side. A single session lasts 2–4 real-time hours and covers hundreds of in-game years. The game is intended to reward deliberate strategic thought rather than twitch responses.

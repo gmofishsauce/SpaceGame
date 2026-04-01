@@ -1,0 +1,41 @@
+  Files created:
+
+  srv/
+    cmd/spacegame/main.go         — entry point; wires all components
+    internal/game/
+      constants.go                — all tunable parameters (NFR-005)
+      types.go                    — WeaponType, EventType, Owner, DTOs, etc.
+      state.go                    — GameState, StarSystem, Fleet, GameEvent, etc.
+      loader.go                   — CSV parsing + game initialization (FR-005–010)
+      engine.go                   — game loop, fleet arrivals, spawning, bot cadence
+      combat.go                   — round-based parallel stochastic combat (FR-049–054a)
+      economy.go                  — wealth accumulation, econ levels, construction
+      events.go                   — SSE fan-out, frame formatting, known-state updates
+      bot.go                      — BotAgent interface + DefaultBot implementation
+    internal/server/
+      server.go                   — HTTP server setup, routing, embedded SPA serving
+      handlers.go                 — all five API handler functions
+      types.go                    — JSON request/response DTOs
+  web/
+    embed.go                      — //go:embed dist (package webui)
+    dist/index.html               — placeholder until frontend is built
+  server_api.md                   — REST/SSE API documentation
+
+  ---
+  To build and run the server, from the repository root:
+
+  go run ./srv/cmd/spacegame
+
+  or build a binary first:
+
+  go build -o spacegame ./srv/cmd/spacegame
+  ./spacegame
+
+  The server reads nearest.csv and planets.csv from the working directory, so you must run it from
+   the repository root (where those files live). It listens on http://127.0.0.1:8080.
+
+  The placeholder web/dist/index.html is served at / until you build the frontend. When that's
+  ready, run cd web && npm run build and rebuild the binary to embed the compiled SPA.
+
+✻ Brewed for 21m 42s
+
