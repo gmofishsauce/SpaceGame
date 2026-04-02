@@ -1,0 +1,390 @@
+import { CommandSpeedC, FleetSpeedC, WEAPON_DEFS } from './constants.js'
+
+export class UIController {
+    constructor(state, api, starMap) {
+        this.state   = state
+        this.api     = api
+        this.starMap = starMap
+
+        this.yearDisplayEl  = null
+        this.pauseOverlayEl = null
+        this.contextMenuEl  = null
+
+        state.on('stateLoaded', ()     => this._syncPauseOverlay())
+        state.on('clockSync',   ()     => this._syncPauseOverlay())
+        state.on('gameOver',    (data) => this.showGameOverScreen(data))
+    }
+
+    init() {
+        this.yearDisplayEl  = document.getElementById('year-display')
+        this.pauseOverlayEl = document.getElementById('pause-overlay')
+
+        // Local year interpolation at 100 ms (FR-014, NFR-U-1)
+        setInterval(() => this._updateYearDisplay(), 100)
+
+        // Escape: exit destination mode or toggle pause (FR-013)
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') this._onEscape()
+        })
+
+        // Click outside any open context menu closes it
+        document.addEventListener('click', () => this._closeContextMenu())
+    }
+
+    // -------------------------------------------------------------------------
+    // Year display (FR-014)
+    // -------------------------------------------------------------------------
+
+    _updateYearDisplay() {
+        if (!this.yearDisplayEl) return
+        this.yearDisplayEl.textContent = `Year: ${this.state.getLocalYear().toFixed(1)}`
+    }
+
+    // -------------------------------------------------------------------------
+    // Pause overlay (FR-013)
+    // -------------------------------------------------------------------------
+
+    _syncPauseOverlay() {
+        if (!this.pauseOverlayEl) return
+        this.pauseOverlayEl.style.display = this.state.paused ? 'flex' : 'none'
+    }
+
+    _onEscape() {
+        if (this.starMap.destinationMode) {
+            this.starMap.exitDestinationMode()
+            return
+        }
+        this.api.setPaused(!this.state.paused)
+    }
+
+    // -------------------------------------------------------------------------
+    // Context menu (FR-029, FR-030)
+    // -------------------------------------------------------------------------
+
+    showContextMenu(x, y, star) {
+        this._closeContextMenu()
+
+        const sys    = this.state.getKnownState(star.id)
+        const status = sys?.knownStatus ?? 'unknown'
+        const isHuman = (status === 'human') || star.isSol
+
+        const menu = document.createElement('div')
+        menu.className  = 'context-menu'
+        menu.style.left = `${x}px`
+        menu.style.top  = `${y}px`
+
+        const title = document.createElement('div')
+        title.className   = 'context-menu-title'
+        title.textContent = star.displayName
+        menu.appendChild(title)
+
+        if (isHuman) {
+            const econLevel = sys?.knownEconLevel ?? (star.isSol ? 5 : 0)
+            const hasConstructable = star.isSol ||
+                Object.values(WEAPON_DEFS).some(d => d.minLevel <= econLevel)
+
+            if (hasConstructable) {
+                menu.appendChild(this._menuItem('Construct\u2026', () => {
+                    this._closeContextMenu()
+                    this.showConstructDialog(star)
+                }))
+            }
+
+            const stationedFleets = (sys?.knownFleets ?? []).filter(f => !f.inTransit)
+            if (stationedFleets.length > 0) {
+                menu.appendChild(this._menuItem('Command Fleet\u2026', () => {
+                    this._closeContextMenu()
+                    this.showFleetCommandDialog(star, stationedFleets)
+                }))
+            }
+
+            if (!hasConstructable && stationedFleets.length === 0) {
+                menu.appendChild(this._disabledItem('No actions available'))
+            }
+        } else {
+            menu.appendChild(this._disabledItem('No actions available'))
+        }
+
+        document.body.appendChild(menu)
+        this.contextMenuEl = menu
+
+        // Prevent the document-level click listener from immediately closing this menu
+        menu.addEventListener('click', e => e.stopPropagation())
+    }
+
+    _menuItem(label, onClick) {
+        const item = document.createElement('div')
+        item.className   = 'context-menu-item'
+        item.textContent = label
+        item.addEventListener('click', onClick)
+        return item
+    }
+
+    _disabledItem(label) {
+        const item = document.createElement('div')
+        item.className   = 'context-menu-item disabled'
+        item.textContent = label
+        return item
+    }
+
+    _closeContextMenu() {
+        if (this.contextMenuEl) {
+            this.contextMenuEl.remove()
+            this.contextMenuEl = null
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Construction dialog (FR-034, FR-035, FR-036)
+    // -------------------------------------------------------------------------
+
+    showConstructDialog(star) {
+        const sys            = this.state.getKnownState(star.id)
+        const econLevel      = sys?.knownEconLevel ?? (star.isSol ? 5 : 0)
+        const travelYears    = star.isSol ? 0 : (star.distFromSol / CommandSpeedC)
+        const projWealth     = this.state.getProjectedWealth(star.id, travelYears)
+
+        const modal = this._makeModal()
+
+        const title = document.createElement('h2')
+        title.textContent = `Construct at ${star.displayName}`
+        modal.content.appendChild(title)
+
+        if (!star.isSol) {
+            const note = document.createElement('p')
+            note.className   = 'dialog-note'
+            note.textContent =
+                `Command arrives in ${travelYears.toFixed(1)} years. ` +
+                `Projected wealth at arrival: ${projWealth.toFixed(1)}.`
+            modal.content.appendChild(note)
+        }
+
+        const table = document.createElement('table')
+        table.className   = 'weapon-table'
+        table.innerHTML =
+            '<thead><tr><th>Weapon</th><th>Cost</th><th>Min Level</th><th></th></tr></thead>'
+        const tbody = document.createElement('tbody')
+
+        for (const [typeId, def] of Object.entries(WEAPON_DEFS)) {
+            const canLevel  = econLevel  >= def.minLevel
+            const canAfford = projWealth >= def.cost
+            const canBuild  = canLevel && canAfford
+
+            const row = document.createElement('tr')
+            row.innerHTML =
+                `<td>${def.displayName}</td>` +
+                `<td>${def.cost}</td>` +
+                `<td>${def.minLevel}</td>`
+
+            const td  = document.createElement('td')
+            const btn = document.createElement('button')
+            btn.textContent = 'Build'
+            btn.disabled    = !canBuild
+            if (!canLevel) {
+                btn.title = `Requires economy level ${def.minLevel}`
+            } else if (!canAfford) {
+                btn.title = `Need ${def.cost} wealth (projected: ${projWealth.toFixed(1)})`
+            }
+            btn.addEventListener('click', () => {
+                modal.overlay.remove()
+                this._sendConstruct(star.id, typeId)
+            })
+            td.appendChild(btn)
+            row.appendChild(td)
+            tbody.appendChild(row)
+        }
+
+        table.appendChild(tbody)
+        modal.content.appendChild(table)
+        modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+        document.body.appendChild(modal.overlay)
+    }
+
+    async _sendConstruct(systemId, weaponType) {
+        const resp = await this.api.sendCommand({
+            type: 'construct',
+            systemId,
+            weaponType,
+            quantity: 1,
+        })
+        if (!resp.ok) this.showCommandError(resp.error)
+    }
+
+    // -------------------------------------------------------------------------
+    // Fleet command dialog (FR-037, FR-038)
+    // -------------------------------------------------------------------------
+
+    showFleetCommandDialog(star, fleets) {
+        const modal = this._makeModal()
+
+        const title = document.createElement('h2')
+        title.textContent = `Command Fleet from ${star.displayName}`
+        modal.content.appendChild(title)
+
+        const note = document.createElement('p')
+        note.className   = 'dialog-note'
+        note.textContent = 'Select a fleet, then click a destination star.'
+        modal.content.appendChild(note)
+
+        const list = document.createElement('ul')
+        list.className = 'fleet-list'
+
+        for (const fleet of fleets) {
+            const li = document.createElement('li')
+            li.className   = 'fleet-item'
+            li.textContent = `${fleet.name} — ${this._formatUnits(fleet.units)}`
+            li.addEventListener('click', () => {
+                modal.overlay.remove()
+                this.starMap.enterDestinationMode(fleet.id, star.id)
+            })
+            list.appendChild(li)
+        }
+
+        modal.content.appendChild(list)
+        modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+        document.body.appendChild(modal.overlay)
+    }
+
+    // Called by StarMap when the user clicks a destination star (FR-038, A-5)
+    confirmFleetDestination(destStar) {
+        const fleetId  = this.starMap.destinationFleetId
+        const originId = this.starMap.destinationOriginId
+
+        const originStar       = this.state.stars.find(s => s.id === originId)
+        const commandYears     = (originStar && !originStar.isSol)
+            ? originStar.distFromSol / CommandSpeedC : 0
+        const fleetTravelYears = originStar
+            ? this._starDist(originStar, destStar) / FleetSpeedC : 0
+        const totalYears       = commandYears + fleetTravelYears
+
+        const sys       = this.state.getKnownState(originId)
+        const fleet     = sys?.knownFleets?.find(f => f.id === fleetId)
+        const fleetName = fleet?.name ?? fleetId
+
+        const modal = this._makeModal()
+
+        const title = document.createElement('h2')
+        title.textContent = 'Confirm Fleet Movement'
+        modal.content.appendChild(title)
+
+        const msg = document.createElement('p')
+        msg.textContent =
+            `Send ${fleetName} from ${originStar?.displayName ?? originId} ` +
+            `to ${destStar.displayName}?`
+        modal.content.appendChild(msg)
+
+        const timing = document.createElement('p')
+        timing.className   = 'dialog-note'
+        timing.textContent =
+            `Command arrives at origin in ${commandYears.toFixed(1)} years. ` +
+            `Fleet reaches destination ~${totalYears.toFixed(1)} years from now.`
+        modal.content.appendChild(timing)
+
+        const confirmBtn = document.createElement('button')
+        confirmBtn.textContent = 'Confirm'
+        confirmBtn.addEventListener('click', () => {
+            modal.overlay.remove()
+            this._sendMove(originId, fleetId, destStar.id)
+        })
+        modal.content.appendChild(confirmBtn)
+
+        // Cancel puts the player back into destination-selection mode
+        modal.content.appendChild(this._cancelButton(() => {
+            modal.overlay.remove()
+            this.starMap.enterDestinationMode(fleetId, originId)
+        }))
+
+        document.body.appendChild(modal.overlay)
+    }
+
+    async _sendMove(systemId, fleetId, destinationId) {
+        const resp = await this.api.sendCommand({
+            type: 'move',
+            systemId,
+            fleetId,
+            destinationId,
+        })
+        if (!resp.ok) this.showCommandError(resp.error)
+    }
+
+    // -------------------------------------------------------------------------
+    // Game-over screen (FR-058)
+    // -------------------------------------------------------------------------
+
+    showGameOverScreen(data) {
+        const overlay = document.createElement('div')
+        overlay.id = 'game-over-overlay'
+
+        const box = document.createElement('div')
+        box.id = 'game-over-box'
+
+        const heading = document.createElement('h1')
+        heading.textContent = data.winner === 'human' ? 'VICTORY' : 'DEFEAT'
+        heading.className   = data.winner === 'human' ? 'victory-text' : 'defeat-text'
+        box.appendChild(heading)
+
+        const reason = document.createElement('p')
+        reason.textContent = data.reason ?? ''
+        box.appendChild(reason)
+
+        const closeBtn = document.createElement('button')
+        closeBtn.textContent = 'Close'
+        closeBtn.addEventListener('click', () => overlay.remove())
+        box.appendChild(closeBtn)
+
+        overlay.appendChild(box)
+        document.body.appendChild(overlay)
+    }
+
+    // -------------------------------------------------------------------------
+    // Error toast
+    // -------------------------------------------------------------------------
+
+    showCommandError(message) {
+        const toast = document.createElement('div')
+        toast.className   = 'error-toast'
+        toast.textContent = message
+        document.body.appendChild(toast)
+        setTimeout(() => toast.remove(), 4000)
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    _makeModal() {
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay'
+
+        const content = document.createElement('div')
+        content.className = 'modal-content'
+        overlay.appendChild(content)
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.remove()
+        })
+
+        return { overlay, content }
+    }
+
+    _cancelButton(onClick) {
+        const btn = document.createElement('button')
+        btn.className   = 'cancel-btn'
+        btn.textContent = 'Cancel'
+        btn.addEventListener('click', onClick)
+        return btn
+    }
+
+    _formatUnits(units) {
+        if (!units) return ''
+        return Object.entries(units)
+            .filter(([, count]) => count > 0)
+            .map(([type, count]) => `${count} ${type.replace(/_/g, ' ')}`)
+            .join(', ')
+    }
+
+    _starDist(a, b) {
+        const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z
+        return Math.sqrt(dx*dx + dy*dy + dz*dz)
+    }
+}

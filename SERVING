@@ -1,0 +1,65 @@
+I will have vite bundle all the javascript. How do I get the server to serve it?                
+                                                                                   
+  Searched for 1 pattern (ctrl+o to expand)                                                       
+                                                            
+⏺ The mechanism is already in place — here's how the pieces connect:                              
+   
+  web/embed.go contains:                                                                          
+  //go:embed dist                                           
+  var DistFS embed.FS                                                                             
+                                                            
+  The //go:embed directive bakes the entire web/dist/ tree into the Go binary at compile time. The
+   server then serves those files via http.FileServerFS. There is no runtime file access.         
+   
+  Workflow                                                                                        
+                                                            
+  1. Set up your Vite project inside web/                                                         
+                                                            
+  cd web
+  npm create vite@latest .   # "." = current directory
+                                                                                                  
+  1. Vite's default output directory is already dist, which is exactly what //go:embed dist       
+  expects. No vite.config.js changes are needed for that.                                         
+  2. Build the frontend                                                                           
+                                                            
+  cd web && npm run build
+
+  2. This writes the bundled output to web/dist/.                                                 
+  3. Rebuild the Go server
+                                                                                                  
+  go build -o spacegame ./srv/cmd/spacegame                 
+
+  3. This is the step people forget. Because the files are embedded at compile time, every time   
+  you change frontend code you need to rebuild the binary. The previous web/dist/ contents
+  (including the placeholder index.html) are replaced by Vite's output, and the new Go binary     
+  embeds the new files.                                     
+  4. Run
+
+  ./spacegame       # from the repo root                                                          
+   
+  Why recompile is required                                                                       
+                                                            
+  //go:embed is not a runtime file server — it reads the files from disk once, at go build time,  
+  and stores them in the binary. This is what makes the server self-contained (no web/dist/
+  directory needed at runtime), but it means the build steps are coupled.                         
+                                                            
+  For development (avoid rebuilding Go on every JS change)                                        
+   
+  During active frontend development, rebuilding Go every time is tedious. You can swap to runtime
+   file serving temporarily by changing server.go to use http.FileServer(http.Dir("web/dist"))
+  instead of the embed, then switch back to the embed for production builds. That said, since the 
+  API is all that the frontend calls, you can also just run vite dev (which has its own dev server
+   with HMR) pointed at http://127.0.0.1:8080 for the API — Vite's proxy config in vite.config.js
+  handles this:
+
+  export default {
+    server: {
+      proxy: {
+        '/api': 'http://127.0.0.1:8080'
+      }                                                                                           
+    }
+  }                                                                                               
+                                                            
+  With that setup: npm run dev for frontend development (JS changes hot-reload instantly), go run 
+  ./srv/cmd/spacegame for the API backend. When ready to ship, npm run build then go build.
+ 

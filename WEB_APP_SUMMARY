@@ -1,0 +1,27 @@
+Clean build. The warning is just Three.js being large (~500 KB bundled, 130 KB
+   gzipped) — normal and expected, not an error.
+
+  ---
+  The two corrections I made vs. the previous files:
+
+  main.js ordering — I moved state.initGameState(gameState) to after
+  starMap.init(), sidebar.init(), and ui.init(). The design's order puts it
+  before those calls, but that means stateLoaded fires before the DOM elements
+  exist and before starMap.pointsGeometry is built, so all three listeners would
+   no-op. The reordering means all listeners fire with everything ready.
+
+  index.html DOM — Added id="year-display", id="pause-overlay", id="sidebar",
+  and id="event-log", which ui.init() and sidebar.init() look up by ID.
+
+  ---
+  All 8 files are complete:
+  - package.json, vite.config.js, index.html — scaffolding
+  - src/constants.js — display constants
+  - src/state.js — client-side state store
+  - src/api.js — HTTP/SSE client
+  - src/starmap.js — Three.js map
+  - src/sidebar.js — event log
+  - src/ui.js — year counter, pause, menus, dialogs
+  - src/main.js — wiring
+
+
