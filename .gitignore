@@ -1,7 +1,7 @@
 # ── Go ──────────────────────────────────────────────────────────────────────
 # Compiled binaries
-spacegame
-spacegame.exe
+/spacegame
+/spacegame.exe
 *.exe
 *.exe~
 *.dll
