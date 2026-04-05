@@ -50,8 +50,8 @@ export class UIController {
     }
 
     _onEscape() {
-        if (this.starMap.destinationMode) {
-            this.starMap.exitDestinationMode()
+        if (this.starMap.selectionMode) {
+            this.starMap.exitSelectionMode()
             return
         }
         this.api.setPaused(!this.state.paused)
@@ -66,7 +66,6 @@ export class UIController {
 
         const sys    = this.state.getKnownState(star.id)
         const status = sys?.knownStatus ?? 'unknown'
-        const isHuman = (status === 'human') || star.isSol
 
         const menu = document.createElement('div')
         menu.className  = 'context-menu'
@@ -78,17 +77,12 @@ export class UIController {
         title.textContent = star.displayName
         menu.appendChild(title)
 
-        if (isHuman) {
-            const econLevel = sys?.knownEconLevel ?? (star.isSol ? 5 : 0)
-            const hasConstructable = star.isSol ||
-                Object.values(WEAPON_DEFS).some(d => d.minLevel <= econLevel)
-
-            if (hasConstructable) {
-                menu.appendChild(this._menuItem('Construct\u2026', () => {
-                    this._closeContextMenu()
-                    this.showConstructDialog(star)
-                }))
-            }
+        if (star.isSol) {
+            // Sol: "Construct…" unconditionally (FR-030, FR-034); fleet command if fleets present
+            menu.appendChild(this._menuItem('Construct\u2026', () => {
+                this._closeContextMenu()
+                this.starMap.enterSelectionMode('construct')
+            }))
 
             const stationedFleets = (sys?.knownFleets ?? []).filter(f => !f.inTransit)
             if (stationedFleets.length > 0) {
@@ -97,11 +91,19 @@ export class UIController {
                     this.showFleetCommandDialog(star, stationedFleets)
                 }))
             }
-
-            if (!hasConstructable && stationedFleets.length === 0) {
+        } else if (status === 'human') {
+            // Non-Sol human system: fleet command only, never construction (FR-034)
+            const stationedFleets = (sys?.knownFleets ?? []).filter(f => !f.inTransit)
+            if (stationedFleets.length > 0) {
+                menu.appendChild(this._menuItem('Command Fleet\u2026', () => {
+                    this._closeContextMenu()
+                    this.showFleetCommandDialog(star, stationedFleets)
+                }))
+            } else {
                 menu.appendChild(this._disabledItem('No actions available'))
             }
         } else {
+            // Alien-held, unknown, or uninhabited (FR-029)
             menu.appendChild(this._disabledItem('No actions available'))
         }
 
@@ -235,7 +237,7 @@ export class UIController {
             li.textContent = `${fleet.name} — ${this._formatUnits(fleet.units)}`
             li.addEventListener('click', () => {
                 modal.overlay.remove()
-                this.starMap.enterDestinationMode(fleet.id, star.id)
+                this.starMap.enterSelectionMode('fleet', fleet.id, star.id)
             })
             list.appendChild(li)
         }

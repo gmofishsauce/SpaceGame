@@ -46,8 +46,9 @@ export class StarMap {
 
         this.renderPending = false
 
-        // Destination-selection mode state (FR-038)
-        this.destinationMode = false
+        // Selection mode state (A-5, FR-034, FR-038)
+        this.selectionMode = null          // null | 'fleet' | 'construct'
+        this.selectionBannerEl = null
         this.destinationFleetId = null
         this.destinationOriginId = null
 
@@ -212,13 +213,18 @@ export class StarMap {
             if (star && this.ui) this.ui.showContextMenu(e.clientX, e.clientY, star)
         })
 
-        // Left-click: consumed only in destination-selection mode (FR-038)
+        // Left-click: consumed only in selection mode (A-5, FR-034, FR-038)
         this.renderer.domElement.addEventListener('click', (e) => {
-            if (!this.destinationMode) return
+            if (!this.selectionMode) return
             const star = this._getStarAtEvent(e)
             if (star && this.ui) {
-                this.exitDestinationMode()
-                this.ui.confirmFleetDestination(star)
+                const mode = this.selectionMode
+                this.exitSelectionMode()
+                if (mode === 'fleet') {
+                    this.ui.confirmFleetDestination(star)
+                } else {
+                    this.ui.showConstructDialog(star)
+                }
             }
         })
 
@@ -286,7 +292,11 @@ export class StarMap {
             }
         }
 
-        this.hoverPopup = new CSS2DObject(popup)
+        const popupAnchor = document.createElement('div')
+        popupAnchor.style.cssText = 'width:0;height:0;overflow:visible'
+        popupAnchor.appendChild(popup)
+
+        this.hoverPopup = new CSS2DObject(popupAnchor)
         this.hoverPopup.position.set(star.x, star.y, star.z)
         this.scene.add(this.hoverPopup)
 
@@ -412,21 +422,35 @@ export class StarMap {
     }
 
     // -------------------------------------------------------------------------
-    // Destination-selection mode (FR-038)
+    // Selection mode (A-5, FR-034, FR-038)
     // -------------------------------------------------------------------------
 
-    enterDestinationMode(fleetId, originSystemId) {
-        this.destinationMode     = true
+    enterSelectionMode(mode, fleetId = null, originSystemId = null) {
+        this.selectionMode       = mode
         this.destinationFleetId  = fleetId
         this.destinationOriginId = originSystemId
         this.renderer.domElement.style.cursor = 'crosshair'
+
+        if (!this.selectionBannerEl) {
+            this.selectionBannerEl = document.getElementById('selection-banner')
+        }
+        if (this.selectionBannerEl) {
+            this.selectionBannerEl.textContent = mode === 'construct'
+                ? 'Select the system where this order will execute \u2014 Esc to cancel'
+                : 'Select a destination system \u2014 Esc to cancel'
+            this.selectionBannerEl.style.display = 'block'
+        }
     }
 
-    exitDestinationMode() {
-        this.destinationMode     = false
+    exitSelectionMode() {
+        this.selectionMode       = null
         this.destinationFleetId  = null
         this.destinationOriginId = null
         this.renderer.domElement.style.cursor = ''
+
+        if (this.selectionBannerEl) {
+            this.selectionBannerEl.style.display = 'none'
+        }
     }
 
     // -------------------------------------------------------------------------

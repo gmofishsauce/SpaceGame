@@ -44,7 +44,7 @@
       color: #ccc;
       pointer-events: none;
       white-space: nowrap;
-      transform: translate(10px, -50%);
+      transform: translate(-50%, calc(-100% - 6px));
     }
     .star-name   { color: #fff;  font-size: 13px; font-weight: bold; margin-bottom: 3px; }
     .star-status { color: #aac; }
@@ -291,6 +291,26 @@
     .defeat-text  { color: #f44; font-size: 52px; letter-spacing: 8px; }
 
     /* ------------------------------------------------------------------ */
+    /* Selection-mode banner (A-5)                                        */
+    /* ------------------------------------------------------------------ */
+    #selection-banner {
+      display: none;
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 10, 30, 0.92);
+      border: 1px solid #446;
+      border-radius: 4px;
+      color: #aac;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      padding: 8px 22px;
+      z-index: 250;
+      pointer-events: none;
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Error toast                                                         */
     /* ------------------------------------------------------------------ */
     .error-toast {
@@ -309,10 +329,11 @@
       pointer-events: none;
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-C-vAdvK1.js"></script>
+  <script type="module" crossorigin src="/assets/index-CfwCfekf.js"></script>
 </head>
 <body>
   <div id="year-display">Year: 0.0</div>
+  <div id="selection-banner"></div>
   <div id="pause-overlay">&#9208; PAUSED</div>
   <div id="sidebar">
     <div id="event-log"></div>
