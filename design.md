@@ -77,7 +77,7 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 | ID | Requirement |
 |----|-------------|
 | **FR-029** | All player commands originate from Sol. Right-clicking Sol opens an action context menu. Right-clicking any other star system opens a read-only status display showing best-known information about that system (based on reported events that have arrived at Sol); no commands may be issued from non-Sol systems. |
-| **FR-030** | The Sol context menu only shows actions valid given Sol's current state (construction if output is sufficient; fleet command if fleets are present). |
+| **FR-030** | The Sol context menu shows "Construct…" unconditionally (wealth and econ-level feasibility are checked later, once the target system is known) and "Command Fleet…" only if fleets are present at Sol. |
 | **FR-031** | Commands dispatched from Sol to a target system are delayed by `dist(Sol, system) / 0.8` in-game years before taking effect at the target. Commands targeting Sol itself take effect immediately. |
 | **FR-032** | When presenting a construction or fleet-command dialog, the UI displays projected state estimates at command-arrival time, not the current known state. |
 | **FR-033** | The arrival of a command at its target system is a logged event (FR-015). A separate logged event records the outcome: executed, impossible, or ignored. If impossible or ignored, the outcome event propagates to Earth using whatever reporting mechanism is available in the target system. |
@@ -86,8 +86,8 @@ Requirements are numbered as in `requirements.md`. This section is the developer
 
 | ID | Requirement |
 |----|-------------|
-| **FR-034** | Systems capable of construction show a "Construct…" option in the right-click menu. |
-| **FR-035** | The construction dialog lists weapon types affordable given the system's projected economic output and level at command-arrival time. |
+| **FR-034** | Only Sol shows a "Construct…" option in the right-click menu. Clicking it starts a two-step flow: the player first selects a target system by clicking on the star map, then selects a weapon type from a dialog scoped to that target system. Right-clicking any other system never offers construction. |
+| **FR-035** | The construction dialog opens after the player has selected a target system. It lists weapon types buildable given the target system's known economic level and projected wealth at command-arrival time (travel time is known at this point because the target has already been chosen). |
 | **FR-036** | Selecting a weapon type dispatches a construction order; on arrival, the unit count increments and accumulated output is debited. |
 
 ### 2.9 Player Actions — Fleet Command
@@ -183,8 +183,8 @@ Events are only visible at Sol if reported. Two reporting mechanisms exist: (1) 
 **A-4 — FR-032: "projected estimates"**
 The requirements call for projected state at command-arrival time. For accumulated economic output, projection = `current_accum + econRate × commandTravelTime`. For system forces, projection is identical to current known state (no way to predict other orders in flight). The dialog will display both the projected output and a note that force projections may be outdated.
 
-**A-5 — FR-038: How to select destination**
-The requirements say "select a fleet and a destination star system" but do not specify the interaction. This design implements: after the player selects a fleet in the Command dialog, the dialog closes and the map enters "destination-selection mode" (cursor changes to crosshair, Escape cancels). The next left-click on any star opens a confirmation dialog showing transit time. Escape or clicking a non-star area cancels.
+**A-5 — FR-034, FR-038: Star-map selection mode**
+Both construction and fleet-move commands use a shared "selection mode" on the star map (cursor changes to crosshair; a banner prompts the player; Escape cancels). For fleet moves: after the player selects a fleet in the Command dialog, the dialog closes and the map enters selection mode. The next left-click on a star opens a confirmation dialog showing transit time, then dispatches the move. For construction: after the player clicks "Construct…" on Sol's context menu, the map immediately enters selection mode with the banner "Select the system where this order will execute". The next left-click on a star opens the construction weapon-selection dialog for that target system; the player selects a weapon and confirms, then the order is dispatched. In both cases Escape exits selection mode without issuing a command.
 
 **A-6 — FR-053: "other signals"**
 FR-053 states that without a Reporter, the occurrence of combat "may eventually be inferred from other signals." This design defers that inference mechanic entirely (MVP does not implement it). A system with no Reporter present during combat generates no event that reaches Earth; the system's known status simply stops updating.
@@ -1480,7 +1480,7 @@ document.addEventListener('DOMContentLoaded', init)
   1. **Per-vertex colors** on the Points geometry (status-based coloring, FR-020).
   2. **Extended hover popup** (status, year, econ, forces — FR-021).
   3. **Right-click handler** for context menus (FR-029).
-  4. **Destination-selection mode** (left-click selects fleet destination).
+  4. **Selection mode** (left-click selects a target star for either fleet movement or construction orders; see A-5).
   5. **Sidebar highlight**: a method `highlightStar(systemId)` that temporarily brightens a star's vertex color.
 
 **Status colors** (tunable constants in `web/src/constants.js`):
@@ -1570,18 +1570,24 @@ renderer.domElement.addEventListener('contextmenu', (e) => {
 
 **Context menu** (`showContextMenu(x, y, star)`):
 1. Close any existing context menu.
-2. Determine valid actions from `state.getKnownState(star.id)`:
-   - If human-held: show "Construct…" if econ level ≥ min buildable, "Command…" if fleets present.
-   - If alien-held or unknown: no actions available (show "No actions available").
-   - If Sol: always show "Construct…" and "Command…" if applicable.
+2. Determine valid actions:
+   - If Sol: show "Construct…" unconditionally; show "Command Fleet…" if fleets are present.
+   - If any other human-held system: show "Command Fleet…" if fleets are present; never show "Construct…".
+   - If alien-held, unknown, or uninhabited: show "No actions available".
 3. Render a `<div class="context-menu">` at `(x, y)`.
 4. Clicking outside closes menu.
 
-**Construction dialog** (`showConstructDialog(star)`):
-1. Compute `commandTravelYears = star.distFromSol / COMMAND_SPEED_C` (displayed to player).
-2. Compute `projectedWealth = state.getProjectedWealth(star.id, commandTravelYears)`.
-3. Show modal with weapon type table: Name, Cost, Min Level, "Can Build?" (checked if econ level ≥ min and projected output ≥ cost).
-4. On confirm: `POST /api/command` with `{type:"construct", systemId, weaponType, quantity:1}`.
+**Construction target selection** (triggered by "Construct…" on Sol's context menu):
+1. Close the context menu.
+2. Call `starMap.enterSelectionMode('construct')`. The map displays a banner: "Select the system where this order will execute — Esc to cancel". Cursor changes to crosshair.
+3. The player clicks a target star (or presses Escape to cancel, which calls `starMap.exitSelectionMode()`).
+4. On star click: `starMap.exitSelectionMode()` is called, then `ui.showConstructDialog(targetStar)`.
+
+**Construction dialog** (`showConstructDialog(targetStar)`):
+1. Compute `commandTravelYears = targetStar.distFromSol / COMMAND_SPEED_C` (displayed to player).
+2. Compute `projectedWealth = state.getProjectedWealth(targetStar.id, commandTravelYears)`.
+3. Show modal titled "Construct at [targetStar.displayName]" with weapon type table: Name, Cost, Min Level, Build button (enabled if econ level ≥ min and projected wealth ≥ cost).
+4. On "Build": `POST /api/command` with `{type:"construct", systemId: targetStar.id, weaponType, quantity:1}`.
 5. Quantity is always 1 in MVP (dialog shows one unit at a time).
 
 **Fleet command dialog** (`showFleetCommandDialog(star)`):

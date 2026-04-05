@@ -1,1 +1,1 @@
-hi Claude. Here in /Users/jeff/go/src/github.com/gmofishsauce/SpaceGame there is a game, implemented as a  single page application, provided by a small server written in Golang that also offers  APIs so it can act as the authoritative source of game information. 
+hi Claude. Here in /Users/jeff/go/src/github.com/gmofishsauce/SpaceGame there is a game, implemented as a  single page application, provided by a small server written in Golang. The server offers  APIs so it can act as the authoritative source of game information. The SPA is implemented entirely in JavaScript.
