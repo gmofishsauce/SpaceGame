@@ -164,6 +164,32 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDebugState returns the full authoritative event log with ground-truth
+// EventYear timestamps, including internal-only event types, for debugging.
+func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
+	s.state.RLock()
+	defer s.state.RUnlock()
+
+	events := make([]DebugEventDTO, 0, len(s.state.Events))
+	for _, evt := range s.state.Events {
+		events = append(events, DebugEventDTO{
+			ID:          evt.ID,
+			EventYear:   evt.EventYear,
+			ArrivalYear: evt.ArrivalYear,
+			SystemID:    evt.SystemID,
+			Type:        string(evt.Type),
+			Description: evt.Description,
+		})
+	}
+
+	resp := DebugStateResponse{
+		GameYear: s.state.Clock,
+		Events:   events,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 // handlePause toggles pause state. (FR-013)
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

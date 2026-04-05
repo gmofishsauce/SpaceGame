@@ -1,10 +1,16 @@
 export class Sidebar {
-    constructor(state, starMap) {
+    constructor(state, starMap, api) {
         this.state   = state
         this.starMap = starMap
+        this.api     = api
 
         this.sidebarEl  = null
         this.eventLogEl = null
+        this.debugLogEl = null
+        this.debugBtn   = null
+
+        this.debugMode    = false
+        this._pollTimer   = null
 
         state.on('stateLoaded', () => this._onStateLoaded())
         state.on('newEvent',    (evt) => this._appendEvent(evt))
@@ -13,6 +19,10 @@ export class Sidebar {
     init() {
         this.sidebarEl  = document.getElementById('sidebar')
         this.eventLogEl = document.getElementById('event-log')
+        this.debugLogEl = document.getElementById('debug-log')
+        this.debugBtn   = document.getElementById('debug-btn')
+
+        this.debugBtn.addEventListener('click', () => this._toggleDebug())
     }
 
     // -------------------------------------------------------------------------
@@ -28,11 +38,12 @@ export class Sidebar {
     }
 
     // -------------------------------------------------------------------------
-    // Append a single event entry (FR-025, FR-026)
+    // Append a single event entry to the normal log (FR-025, FR-026)
     // -------------------------------------------------------------------------
 
     _appendEvent(evt) {
         if (!this.eventLogEl) return
+        if (this.debugMode) return   // don't accumulate while debug view is shown
 
         const atBottom = this._isAtBottom()
 
@@ -68,6 +79,87 @@ export class Sidebar {
         this.eventLogEl.appendChild(entry)
 
         // Auto-scroll if we were already at the bottom (FR-028)
+        if (atBottom) {
+            this.sidebarEl.scrollTop = this.sidebarEl.scrollHeight
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Debug mode toggle
+    // -------------------------------------------------------------------------
+
+    _toggleDebug() {
+        this.debugMode = !this.debugMode
+
+        if (this.debugMode) {
+            this.debugBtn.textContent = 'normal'
+            this.eventLogEl.style.display = 'none'
+            this.debugLogEl.style.display = ''
+            this._startDebugPoll()
+        } else {
+            this.debugBtn.textContent = 'debug'
+            this._stopDebugPoll()
+            this.debugLogEl.style.display = 'none'
+            this.debugLogEl.innerHTML = ''
+            this.eventLogEl.style.display = ''
+        }
+    }
+
+    _startDebugPoll() {
+        this._fetchAndRenderDebug()
+        this._pollTimer = setInterval(() => this._fetchAndRenderDebug(), 2000)
+    }
+
+    _stopDebugPoll() {
+        if (this._pollTimer !== null) {
+            clearInterval(this._pollTimer)
+            this._pollTimer = null
+        }
+    }
+
+    async _fetchAndRenderDebug() {
+        let data
+        try {
+            data = await this.api.fetchDebugState()
+        } catch (e) {
+            return
+        }
+        if (!this.debugMode) return   // toggled off while fetch was in flight
+
+        const atBottom = this._isAtBottom()
+        this.debugLogEl.innerHTML = ''
+
+        for (const evt of data.events) {
+            const entry = document.createElement('div')
+            entry.className = 'event-entry'
+            entry.dataset.systemId = evt.systemId
+
+            const yearSpan = document.createElement('span')
+            yearSpan.className = 'evt-year'
+            yearSpan.textContent = `Year ${evt.eventYear.toFixed(1)}`
+
+            const sysSpan = document.createElement('span')
+            sysSpan.className = 'evt-system'
+            sysSpan.textContent = this._systemName(evt.systemId)
+
+            const descSpan = document.createElement('span')
+            descSpan.className = 'evt-desc'
+            descSpan.textContent = `[${evt.type}] ${evt.description}`
+
+            entry.appendChild(yearSpan)
+            entry.appendChild(sysSpan)
+            entry.appendChild(descSpan)
+
+            entry.addEventListener('mouseenter', () => {
+                this.starMap.highlightStar(evt.systemId)
+            })
+            entry.addEventListener('mouseleave', () => {
+                this.starMap.unhighlightStar()
+            })
+
+            this.debugLogEl.appendChild(entry)
+        }
+
         if (atBottom) {
             this.sidebarEl.scrollTop = this.sidebarEl.scrollHeight
         }

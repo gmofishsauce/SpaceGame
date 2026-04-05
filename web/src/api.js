@@ -23,6 +23,11 @@ export class APIClient {
         return r.json()
     }
 
+    async fetchDebugState() {
+        const r = await fetch('/api/debug/state')
+        return r.json()
+    }
+
     async setPaused(paused) {
         const r = await fetch('/api/pause', {
             method: 'POST',

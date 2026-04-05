@@ -78,6 +78,7 @@ func (s *Server) buildMuxWithFS(spaFS fs.FS) http.Handler {
 	mux.HandleFunc("/api/events", s.recoverMiddleware(s.handleEvents))
 	mux.HandleFunc("/api/command", s.recoverMiddleware(s.handleCommand))
 	mux.HandleFunc("/api/pause", s.recoverMiddleware(s.handlePause))
+	mux.HandleFunc("/api/debug/state", s.recoverMiddleware(s.handleDebugState))
 
 	// SPA catch-all: serve from embedded FS. If spaFS is nil serve a bare 404.
 	if spaFS != nil {

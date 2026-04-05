@@ -81,3 +81,19 @@ type StateResponse struct {
 	Systems   []SystemDTO `json:"systems"`
 	Events    []EventDTO  `json:"events"`
 }
+
+// DebugEventDTO is a full authoritative event entry for the debug log.
+type DebugEventDTO struct {
+	ID          string  `json:"id"`
+	EventYear   float64 `json:"eventYear"`
+	ArrivalYear float64 `json:"arrivalYear"`
+	SystemID    string  `json:"systemId"`
+	Type        string  `json:"type"`
+	Description string  `json:"description"`
+}
+
+// DebugStateResponse is returned by GET /api/debug/state.
+type DebugStateResponse struct {
+	GameYear float64         `json:"gameYear"`
+	Events   []DebugEventDTO `json:"events"`
+}

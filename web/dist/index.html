@@ -101,7 +101,17 @@
       z-index: 100;
     }
 
+    #sidebar-header {
+      padding: 8px 10px;
+      border-bottom: 1px solid #224;
+      position: sticky;
+      top: 0;
+      background: rgba(0, 0, 10, 0.97);
+      z-index: 1;
+    }
+
     #event-log { padding: 6px 0; }
+    #debug-log  { padding: 6px 0; }
 
     .event-entry {
       padding: 5px 10px;
@@ -329,14 +339,18 @@
       pointer-events: none;
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-CfwCfekf.js"></script>
+  <script type="module" crossorigin src="/assets/index-DhfsiukP.js"></script>
 </head>
 <body>
   <div id="year-display">Year: 0.0</div>
   <div id="selection-banner"></div>
   <div id="pause-overlay">&#9208; PAUSED</div>
   <div id="sidebar">
+    <div id="sidebar-header">
+      <button id="debug-btn">debug</button>
+    </div>
     <div id="event-log"></div>
+    <div id="debug-log" style="display:none;"></div>
   </div>
 </body>
 </html>

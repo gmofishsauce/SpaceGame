@@ -7,7 +7,7 @@ import { UIController }  from './ui.js'
 const state   = new ClientState()
 const api     = new APIClient(state)
 const starMap = new StarMap(state)
-const sidebar = new Sidebar(state, starMap)
+const sidebar = new Sidebar(state, starMap, api)
 const ui      = new UIController(state, api, starMap)
 starMap.setUIController(ui)
 
