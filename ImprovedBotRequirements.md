@@ -1,5 +1,14 @@
 # Requirements: BasicBot — External Alien Bot for SpaceGame
-Version: 0.1
+Version: 0.2
+
+---
+
+## Change Log
+
+| Version | Date | Summary |
+|---------|------|---------|
+| 0.1 | 2025 | Initial draft |
+| 0.2 | 2026-04-05 | Add kzinhome alien home world (§2.5); add `GET /api/alien/state` endpoint (§2.6); change initial alien fleet composition (§2.7); defer alien economic simulation (§6) |
 
 ---
 
@@ -14,10 +23,20 @@ This document specifies an **external standalone program** (`BasicBot`) that
 replaces `DefaultBot` as the alien-side driver during a game session. The key
 design principle is that `BasicBot` operates under **the same information
 constraints as the human player**: it uses only the public REST/SSE API that
-the game server already exposes to browsers, supplemented by two new
-alien-specific endpoints (one read, one write). It never receives ground-truth
+the game server already exposes to browsers, supplemented by three new
+alien-specific endpoints (two read, one write). It never receives ground-truth
 game state about human-held systems, uninhabited systems, or unreported
 combat events.
+
+Unknown to the human player, the alien empire's home world is **kzinhome**
+(61 Ursae Majoris, ~31.1 light years from Sol). All alien strategic decisions
+originate from kzinhome. Just as the human player at Sol experiences
+speed-of-light information delay from distant systems, alien intelligence must
+travel from the battlefield back to kzinhome — a baseline distance of 31 light
+years — before it can inform bot decisions. This extra distance is a deliberate
+gameplay handicap: the alien bot will be working with older information about
+the human sphere than the human player is, particularly in the critical region
+near Sol where most combat will occur.
 
 `BasicBot` is explicitly a **debugging tool**, not a competitive opponent. Its
 goal is to make enough legal, coherent moves that the game mechanics — fleet
@@ -152,7 +171,7 @@ bot: SPACEGAME_EXTERNAL_BOT=1; using NullBot — external bot expected on /api/a
 
 ### 2.4 Route Registration
 
-**SRV-017** Both new endpoints must be registered in `buildMuxWithFS` in
+**SRV-017** All three new endpoints must be registered in `buildMuxWithFS` in
 `srv/internal/server/server.go`, wrapped in `recoverMiddleware`, alongside the
 existing five routes. The routing table after this change:
 
@@ -165,6 +184,156 @@ existing five routes. The routing table after this change:
 | `POST` | `/api/pause` | `handlePause` (unchanged) |
 | `GET` | `/api/alien/fleets` | `handleAlienFleets` *(new)* |
 | `POST` | `/api/alien/move` | `handleAlienMove` *(new)* |
+| `GET` | `/api/alien/state` | `handleAlienState` *(new)* |
+
+---
+
+### 2.5 Alien Home World: kzinhome
+
+**SRV-018** The server must maintain a hidden `StarSystem` with ID `"kzinhome"`
+and display name `"61 Ursae Majoris"` in `state.Systems`. This system
+represents the alien home world and is the reference point for all alien
+information-delay calculations. Its 3D coordinates must correspond to the
+real astronomical position of 61 Ursae Majoris converted using the same
+equatorial-to-Cartesian transform and Three.js axis remapping used for all
+other systems in the loader (`jx = ax`, `jy = az`, `jz = -ay`). Its distance
+from Sol is approximately 31.1 light years.
+
+61 Ursae Majoris astronomical coordinates for the loader:
+- RA: `11 41 03.0` (hours minutes seconds)
+- Dec: `+34 12 06` (degrees arcminutes arcseconds)
+- Distance: `31.1` light years
+
+These values should be hardcoded as constants rather than read from
+`nearest.csv`, because the star may appear in the CSV under various catalog
+names and because its special role warrants explicit treatment.
+
+**SRV-019** kzinhome must **not** be added to `state.SystemOrder`. Because
+both `handleStars` and `handleState` iterate `state.SystemOrder` to build
+their responses, this single exclusion is sufficient to hide kzinhome from
+all player-facing endpoints without modifying those handlers. kzinhome is
+accessible internally via `state.Systems["kzinhome"]`.
+
+**SRV-020** If 61 Ursae Majoris appears in `nearest.csv` under any catalog or
+common name, the loader must skip that row (not add it to the game's normal
+system set) and instead use the hardcoded kzinhome entry. The loader must log
+a message if it detects and skips such a row, e.g.:
+```
+loader: skipping 61 UMa / HD 101501 from nearest.csv; using hardcoded kzinhome
+```
+Detection: match any row whose distance field rounds to 31.1 LY and whose
+RA/Dec are within 0.1° of the values above.
+
+---
+
+### 2.6 New Endpoint: `GET /api/alien/state`
+
+This endpoint provides the game state as seen from kzinhome. It mirrors the
+structure of `GET /api/state` but applies alien-perspective information delay:
+status-changing events reach kzinhome after `dist(event_system, kzinhome)`
+years, not `dist(event_system, sol)` years.
+
+**SRV-021** The server must expose a new read endpoint at `GET /api/alien/state`.
+The response body must use the same JSON structure as `GET /api/state`
+(`StateResponse`): `gameYear`, `paused`, `gameOver`, `winner`, `winReason`,
+`systems`, and `events`.
+
+**SRV-022** The `gameYear`, `paused`, `gameOver`, `winner`, and `winReason`
+fields in the response must reflect current ground truth (no information delay).
+
+**SRV-023** The `systems` array must contain one entry per system in
+`state.SystemOrder` (i.e., all normal game systems, excluding kzinhome). For
+each system, the `knownStatus` field must reflect the **alien-perspective
+known status** (`AlienKnownStatus`), defined in SRV-024 through SRV-027.
+All other system fields (`knownEconLevel`, `knownWealth`, `knownLocalUnits`,
+`knownFleets`) must be returned as zero/empty; the bot does not use them and
+the server does not maintain them for the alien perspective.
+
+**SRV-024** Each `StarSystem` must gain two new fields:
+
+```go
+AlienKnownStatus  SystemStatus  // alien-perspective known status
+AlienKnownAsOfYear float64      // game year of the most recent event that updated AlienKnownStatus
+```
+
+These fields are not included in `GET /api/state` or any other player-facing
+response. They are populated by `UpdateAlienKnownStates` (SRV-026).
+
+**SRV-025** At game start (in `Initialize` in `loader.go`), `AlienKnownStatus`
+must be set equal to `sys.Status` for every system. `AlienKnownAsOfYear` must
+be set to `0.0`. This represents pre-war alien intelligence: the alien empire
+knew the initial configuration of the human sphere before hostilities began.
+
+**SRV-026** A new function `UpdateAlienKnownStates(kzinhome *StarSystem,
+clock float64)` must be added to `state.go`. It must be called from the
+engine's `tick()` function immediately after the existing
+`UpdateKnownStates(clock)` call. Its behavior:
+
+```
+for each event evt in state.Events:
+    if evt.AlienAppliedToKnown: skip
+    alienArrivalYear = evt.EventYear + distBetween(state.Systems[evt.SystemID], kzinhome)
+    if alienArrivalYear > clock: skip
+    applyEventToAlienKnownState(state.Systems[evt.SystemID], evt)
+    evt.AlienAppliedToKnown = true
+```
+
+The `AlienAppliedToKnown bool` field must be added to `GameEvent`.
+
+**SRV-027** `applyEventToAlienKnownState` applies an event to a system's alien
+known state. It must handle the following event types (all others are ignored):
+
+| Event type | Effect on `AlienKnownStatus` |
+|------------|------------------------------|
+| `system_captured` | → `"alien"` |
+| `system_retaken` | → `"human"` |
+| `combat_occurred` (human won) | → `"human"` |
+| `combat_occurred` (alien won) | → `"alien"` |
+| `combat_occurred` (draw) | → `"contested"` |
+
+`AlienKnownAsOfYear` must be updated to `evt.EventYear` whenever a change is
+applied, mirroring the logic in `applyEventToKnownState`.
+
+`EventCombatSilent` and `EventAlienSpawn` must be ignored (they are internal
+and must not propagate to kzinhome).
+
+**SRV-028** The `handleAlienState` handler must acquire the state read lock for
+the duration of the response construction. It must look up kzinhome via
+`state.Systems["kzinhome"]`. If kzinhome is not found (which should not happen
+in a correctly initialised game), the handler must return HTTP 500 with a JSON
+error body. The `events` field in the response must be returned as an empty
+JSON array (`[]`); the bot does not use it, and computing alien-delayed event
+lists is deferred.
+
+---
+
+### 2.7 Initial Alien Fleet Composition
+
+**SRV-029** At game start, each alien entry point must be seeded with one fleet
+consisting of **4 battleships and 12 escort vessels** (16 units total). This
+is accomplished by changing the `AlienInitialComposition` constant in
+`srv/internal/game/constants.go` from its current value to:
+
+```go
+var AlienInitialComposition = map[WeaponType]int{
+    WeaponBattleship: 4,
+    WeaponEscort:     12,
+}
+```
+
+The interceptors previously in `AlienInitialComposition` are removed. With
+two entry points (`AlienEntryCount = 2`), the alien side will field 32 units
+total at game start. This gives the aliens a strong opening attack force
+consistent with their role as the aggressor.
+
+**SRV-030** The `AlienSpawnComposition` constant (used for periodic
+reinforcement waves) is **not changed** by this requirement.
+
+**SRV-031** The `AlienInitialUnits` constant in `constants.go` must be updated
+from `15` to `16` to match the new `AlienInitialComposition` total. Although
+`AlienInitialUnits` is not referenced by the loader (which uses
+`AlienInitialComposition` directly), leaving it at `15` would create a
+misleading inconsistency for future readers of the constants file.
 
 ---
 
@@ -207,9 +376,9 @@ flags must cause the program to print usage and exit with code 1.
 ### 3.3 Startup and Lifecycle
 
 **BOT-006** On startup, `BasicBot` must verify that the game server is
-reachable by issuing `GET /api/state`. If the server is not reachable within
-10 seconds (with retries every 2 seconds), the program must print an error to
-stderr and exit with code 1.
+reachable by issuing `GET /api/alien/state`. If the server is not reachable
+within 10 seconds (with retries every 2 seconds), the program must print an
+error to stderr and exit with code 1.
 
 **BOT-007** `BasicBot` must handle `SIGINT` and `SIGTERM` gracefully: on
 receipt of either signal, the program must complete any in-flight HTTP request,
@@ -227,20 +396,22 @@ perspective.
 `-interval` real seconds (default 5). Each iteration of the loop is called a
 **cycle**.
 
-**BOT-010** If the game is paused (`state.paused == true`) or over
-(`state.gameOver == true`), the bot must skip the cycle entirely and wait for
-the next interval.
+**BOT-010** If the game is paused (`paused == true`) or over
+(`gameOver == true`) as reported by `GET /api/alien/state`, the bot must skip
+the cycle entirely and wait for the next interval.
 
 **BOT-011** Each cycle must execute the following steps in order:
-1. Fetch current player-visible state via `GET /api/state`.
+1. Fetch current alien-perspective game state via `GET /api/alien/state`.
+   This provides pause/gameOver status, game year, and alien-perspective
+   system known statuses used for target selection (§3.5).
 2. Fetch current alien fleet positions via `GET /api/alien/fleets`.
 3. Compute the target list (see §3.5).
 4. Compute fleet assignments (see §3.5).
 5. Issue one `POST /api/alien/move` request per assignment.
 
-**BOT-012** If the `GET /api/state` call fails (non-200 response or network
-error), the bot must log the error to stderr and skip the rest of the cycle.
-The same applies to `GET /api/alien/fleets`.
+**BOT-012** If the `GET /api/alien/state` call fails (non-200 response or
+network error), the bot must log the error to stderr and skip the rest of the
+cycle. The same applies to `GET /api/alien/fleets`.
 
 **BOT-013** If a `POST /api/alien/move` call returns a non-200 response or a
 JSON body with `"ok": false`, the bot must log the error to stderr and
@@ -252,8 +423,11 @@ prevent move commands for other fleets in the same cycle.
 ### 3.5 Strategy: Nearest Human First
 
 **BOT-014** The target list must be constructed as follows:
-- From the `GET /api/state` response, collect all systems whose `knownStatus`
-  is `"human"`.
+- From the `GET /api/alien/state` response, collect all systems whose
+  `knownStatus` is `"human"`. This is the alien-perspective known status,
+  which reflects information that has had time to travel 31+ light years to
+  kzinhome. The bot may therefore be working with older intelligence than the
+  human player, particularly for systems near Sol.
 - Sort this list by Euclidean distance from Sol (ascending) — attack the
   nearest reported human-held systems first.
 - Systems whose `knownStatus` is anything other than `"human"` (including
@@ -293,7 +467,9 @@ multiple fleets from being dispatched to the same destination simultaneously.
 **BOT-019** The Euclidean distance calculation must use the 3D positions
 (`x`, `y`, `z`) of the systems as returned by `GET /api/stars`. The bot must
 fetch `GET /api/stars` once at startup and cache the result for the lifetime
-of the program. System positions never change during a session.
+of the program. System positions never change during a session. kzinhome does
+not appear in `GET /api/stars`; the bot does not need kzinhome's coordinates
+(alien information delay is computed server-side).
 
 ---
 
@@ -322,7 +498,7 @@ flag:
 | Condition | Required behavior |
 |-----------|-------------------|
 | Server unreachable at startup | Retry for 10 s, then exit(1) |
-| `GET /api/state` fails mid-run | Log error, skip cycle |
+| `GET /api/alien/state` fails mid-run | Log error, skip cycle |
 | `GET /api/alien/fleets` fails | Log error, skip cycle |
 | `POST /api/alien/move` returns error | Log error, continue to next fleet |
 | `GET /api/stars` fails at startup | Log error, exit(1) |
@@ -374,8 +550,38 @@ The following are explicitly excluded from this requirements document:
 - Any change to the browser SPA (`web/`).
 - A `POST /api/alien/construct` endpoint (alien forces spawn via the engine's
   `spawnAlienForces`, not via construction orders; this does not change).
-- Alien-side information propagation delay (the bot uses Sol-centric reported
-  state; a proper alien-perspective information model is future work).
 - Save/load compatibility for `BasicBot` session state.
 - Any form of registration, authentication, or session token between
   `BasicBot` and the server.
+
+### Deferred: Alien Economic Simulation
+
+The following requirements are acknowledged as necessary for long-term game
+balance but are **explicitly deferred** to keep the initial `BasicBot`
+implementation simple and get the game online quickly. They should be
+addressed in a future version of this document before `BasicBot` is considered
+feature-complete.
+
+**DEFERRED-001 — Alien star systems**: The alien empire should control star
+systems of its own, not shown in the human UI, that provide industrial and
+strategic depth to the alien side. kzinhome (now defined as a hidden system)
+is the foundation for this, but it currently has no economic or military role
+beyond serving as an information relay point.
+
+**DEFERRED-002 — Alien economy**: kzinhome and any future alien-held systems
+should accumulate wealth and advance economic levels over time, mirroring
+the human economic model. This wealth should fund alien weapons construction,
+allowing the alien side to build forces rather than only receiving periodic
+spawn waves from `spawnAlienForces`.
+
+**DEFERRED-003 — Alien construction orders**: `BasicBot` should be able to
+issue construction commands (analogous to `POST /api/command` with type
+`construct`) to build new units at alien-held systems. A companion server
+endpoint (e.g., `POST /api/alien/construct`) and corresponding bot logic
+would be required. Until this is implemented, alien force generation remains
+entirely under the engine's `spawnAlienForces` mechanism.
+
+Until these deferred items are implemented, the alien side is economically
+passive: it receives spawn waves on a fixed schedule but cannot independently
+grow its industrial base. The initial fleet composition (SRV-029) partially
+compensates by giving the aliens a strong opening force.
