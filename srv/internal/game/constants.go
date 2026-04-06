@@ -36,6 +36,12 @@ const (
 	HumanWinRetentionFraction = 0.60 // fraction of initial human systems to retain
 	AlienWinCaptureFraction   = 0.40 // fraction of all systems for alien win
 
+	// AlienDormancyYears is the number of in-game years after game start during
+	// which the alien bot issues no move commands. Tuned for gameplay balance:
+	// gives the human player time to issue initial construction and scouting
+	// orders before the alien assault begins.
+	AlienDormancyYears = 40.0
+
 	// Bot tick cadence: call bot every N engine ticks (FR-062)
 	BotTickCadence = 10
 

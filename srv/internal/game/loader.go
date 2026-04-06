@@ -80,6 +80,33 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 		sys.KnownLocalUnits = make(map[WeaponType]int)
 		sys.KnownFleetIDs = []string{}
 
+		// Tuned for gameplay balance: every human-held system starts with two
+		// Reporter ships (dispatched with the first wave of colonists) so the
+		// human player has an intelligence capability from turn one.
+		if sys.Status == StatusHuman {
+			fid := state.NewFleetID()
+			fname := state.NewFleetName()
+			fleet := &Fleet{
+				ID:         fid,
+				Name:       fname,
+				Owner:      HumanOwner,
+				Units:      map[WeaponType]int{WeaponReporter: 2},
+				LocationID: id,
+				InTransit:  false,
+			}
+			state.Fleets[fid] = fleet
+			sys.FleetIDs = append(sys.FleetIDs, fid)
+			sys.KnownFleetIDs = append(sys.KnownFleetIDs, fid)
+
+			// Tuned for gameplay balance: every human-held system with planets
+			// starts with a Comm Laser (shipped with the colonists, so it exists
+			// regardless of the system's current economic level).
+			if g.HasPlanets {
+				sys.LocalUnits[WeaponCommLaser] = 1
+				sys.KnownLocalUnits[WeaponCommLaser] = 1
+			}
+		}
+
 		state.Systems[id] = sys
 		state.SystemOrder = append(state.SystemOrder, id)
 	}

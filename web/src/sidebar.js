@@ -76,6 +76,14 @@ export class Sidebar {
             this.starMap.unhighlightStar()
         })
 
+        // Hovering the bold system name shows the standard popup on the star map
+        sysSpan.addEventListener('mouseenter', () => {
+            this.starMap.showPopupForStar(evt.systemId)
+        })
+        sysSpan.addEventListener('mouseleave', () => {
+            this.starMap.hidePopupForStar()
+        })
+
         this.eventLogEl.appendChild(entry)
 
         // Auto-scroll if we were already at the bottom (FR-028)
@@ -155,6 +163,14 @@ export class Sidebar {
             })
             entry.addEventListener('mouseleave', () => {
                 this.starMap.unhighlightStar()
+            })
+
+            // Hovering the bold system name shows the standard popup on the star map
+            sysSpan.addEventListener('mouseenter', () => {
+                this.starMap.showPopupForStar(evt.systemId)
+            })
+            sysSpan.addEventListener('mouseleave', () => {
+                this.starMap.hidePopupForStar()
             })
 
             this.debugLogEl.appendChild(entry)

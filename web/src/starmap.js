@@ -41,6 +41,7 @@ export class StarMap {
         this.currentHoveredIndex = -1
         this.hoverPopup = null
         this.hoverLines = []
+        this.sidebarHoverActive = false
 
         this.highlightedIndex = -1
 
@@ -184,23 +185,25 @@ export class StarMap {
 
         // Mousemove: hover popup + axis lines (FR-021, FR-022)
         window.addEventListener('mousemove', (e) => {
-            mouse.x =  (e.clientX / window.innerWidth)  * 2 - 1
-            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
+            if (!this.sidebarHoverActive) {
+                mouse.x =  (e.clientX / window.innerWidth)  * 2 - 1
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
 
-            raycaster.setFromCamera(mouse, this.camera)
-            const hits = raycaster.intersectObject(this.starPoints)
+                raycaster.setFromCamera(mouse, this.camera)
+                const hits = raycaster.intersectObject(this.starPoints)
 
-            if (hits.length > 0) {
-                const idx = hits[0].index
-                // Sol has no hover per FR-029 (right-click only)
-                if (idx !== this.solIndex && idx !== this.currentHoveredIndex) {
+                if (hits.length > 0) {
+                    const idx = hits[0].index
+                    // Sol has no hover per FR-029 (right-click only)
+                    if (idx !== this.solIndex && idx !== this.currentHoveredIndex) {
+                        this._clearHoverElements()
+                        this._showHoverElements(idx)
+                        this.currentHoveredIndex = idx
+                    }
+                } else if (this.currentHoveredIndex !== -1) {
                     this._clearHoverElements()
-                    this._showHoverElements(idx)
-                    this.currentHoveredIndex = idx
+                    this.currentHoveredIndex = -1
                 }
-            } else if (this.currentHoveredIndex !== -1) {
-                this._clearHoverElements()
-                this.currentHoveredIndex = -1
             }
 
             this.requestRender()
@@ -397,6 +400,22 @@ export class StarMap {
         if (this.highlightedIndex < 0) return
         this._restoreStarColor(this.highlightedIndex)
         this.highlightedIndex = -1
+        this.requestRender()
+    }
+
+    showPopupForStar(systemId) {
+        const idx = this.stars.findIndex(s => s.id === systemId)
+        if (idx < 0) return
+        this.sidebarHoverActive = true
+        this._clearHoverElements()
+        this._showHoverElements(idx)
+        this.requestRender()
+    }
+
+    hidePopupForStar() {
+        this.sidebarHoverActive = false
+        this._clearHoverElements()
+        this.currentHoveredIndex = -1
         this.requestRender()
     }
 

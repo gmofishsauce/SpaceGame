@@ -55,6 +55,12 @@ func (b *DefaultBot) Tick(state *GameState, currentYear float64) []BotCommand {
 		}
 	}()
 
+	// Dormancy: do not move alien forces during the early game so the human
+	// player has time to react. Tuned for gameplay balance; see AlienDormancyYears.
+	if currentYear < AlienDormancyYears {
+		return nil
+	}
+
 	var cmds []BotCommand
 
 	// Build a priority target list: human-held systems sorted by distance
