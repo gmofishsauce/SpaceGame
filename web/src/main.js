@@ -12,17 +12,21 @@ const ui      = new UIController(state, api, starMap)
 starMap.setUIController(ui)
 
 async function init() {
-    const [stars, gameState] = await Promise.all([api.fetchStars(), api.fetchState()])
+    try {
+        const [stars, gameState] = await Promise.all([api.fetchStars(), api.fetchState()])
 
-    // Stars must be stored before starMap.init so the first updateStarColors
-    // can resolve system names; game state is applied last so all DOM elements
-    // are ready before stateLoaded fires its listeners.
-    state.initStars(stars)
-    starMap.init(stars)
-    sidebar.init()
-    ui.init()
-    state.initGameState(gameState)  // emits 'stateLoaded' → colors, sidebar, pause all update
-    api.connectSSE()
+        // Stars must be stored before starMap.init so the first updateStarColors
+        // can resolve system names; game state is applied last so all DOM elements
+        // are ready before stateLoaded fires its listeners.
+        state.initStars(stars)
+        starMap.init(stars)
+        sidebar.init()
+        ui.init()
+        state.initGameState(gameState)  // emits 'stateLoaded' → colors, sidebar, pause all update
+        api.connectSSE()
+    } catch (err) {
+        document.body.textContent = `Failed to connect to game server: ${err}`
+    }
 }
 
 document.addEventListener('DOMContentLoaded', init)

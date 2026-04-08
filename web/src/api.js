@@ -6,11 +6,13 @@ export class APIClient {
 
     async fetchStars() {
         const r = await fetch('/api/stars')
+        if (!r.ok) throw new Error(`/api/stars: ${r.status}`)
         return r.json()
     }
 
     async fetchState() {
         const r = await fetch('/api/state')
+        if (!r.ok) throw new Error(`/api/state: ${r.status}`)
         return r.json()
     }
 
@@ -20,11 +22,13 @@ export class APIClient {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cmd),
         })
+        if (!r.ok) throw new Error(`/api/command: ${r.status}`)
         return r.json()
     }
 
     async fetchDebugState() {
         const r = await fetch('/api/debug/state')
+        if (!r.ok) throw new Error(`/api/debug/state: ${r.status}`)
         return r.json()
     }
 
@@ -34,6 +38,7 @@ export class APIClient {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paused }),
         })
+        if (!r.ok) throw new Error(`/api/pause: ${r.status}`)
         return r.json()
     }
 

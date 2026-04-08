@@ -26,9 +26,10 @@ type GameState struct {
 	Human HumanFaction
 	Alien AlienFaction
 
-	nextFleetNum int
-	nextEventID  int
-	nextCmdID    int
+	nextFleetNum    int
+	nextEventID     int
+	nextCmdID       int
+	knownStateIdx   int // index into Events: all events before this are already applied
 }
 
 // StarSystem is one game entity (one or more co-located stars treated as one system).
@@ -238,20 +239,17 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 // UpdateKnownStates applies all newly matured events (arrivalYear ≤ clock,
 // !AppliedToKnown) to each system's KnownState fields. (FR-018)
 func (s *GameState) UpdateKnownStates(clock float64) {
-	for _, evt := range s.Events {
-		if evt.AppliedToKnown {
-			continue
-		}
+	for s.knownStateIdx < len(s.Events) {
+		evt := s.Events[s.knownStateIdx]
 		if evt.ArrivalYear > clock || evt.ArrivalYear >= math.MaxFloat64 {
-			continue
+			break
 		}
 		sys, ok := s.Systems[evt.SystemID]
-		if !ok {
-			evt.AppliedToKnown = true
-			continue
+		if ok {
+			applyEventToKnownState(sys, evt)
 		}
-		applyEventToKnownState(sys, evt)
 		evt.AppliedToKnown = true
+		s.knownStateIdx++
 	}
 }
 
@@ -300,6 +298,11 @@ func applyEventToKnownState(sys *StarSystem, evt *GameEvent) {
 			}
 		}
 
+	case EventEconGrowth:
+		if d, ok := evt.Details.(*EconGrowthDetails); ok {
+			sys.KnownEconLevel = d.NewLevel
+		}
+
 	case EventFleetArrival:
 		if d, ok := evt.Details.(*FleetArrivalDetails); ok && d.Owner == HumanOwner {
 			sys.KnownFleetIDs = appendIfMissing(sys.KnownFleetIDs, d.FleetID)
@@ -331,8 +334,9 @@ func (s *GameState) CheckVictory() (over bool, winner Owner, reason string) {
 	if sol, ok := s.Systems["sol"]; ok && sol.Status == StatusAlien {
 		return true, AlienOwner, "Earth has been captured by alien forces."
 	}
-	if float64(alienHeld)/float64(totalSystems) >= AlienWinCaptureFraction {
-		return true, AlienOwner, fmt.Sprintf("Alien forces control %.0f%% of all star systems.", float64(alienHeld)/float64(totalSystems)*100)
+	humanInitial := len(s.Human.InitialSystemIDs)
+	if humanInitial > 0 && float64(alienHeld)/float64(humanInitial) >= AlienWinCaptureFraction {
+		return true, AlienOwner, fmt.Sprintf("Alien forces control %.0f%% of human systems.", float64(alienHeld)/float64(humanInitial)*100)
 	}
 
 	// FR-056: Human wins if alien exhausted AND Earth human-held AND

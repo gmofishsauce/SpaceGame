@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"time"
 )
 
@@ -14,11 +15,17 @@ type Engine struct {
 	Events *EventManager
 
 	tickCount int
+	rng       *rand.Rand
 }
 
 // NewEngine creates an Engine wired to the given state, bot, and event manager.
 func NewEngine(state *GameState, bot BotAgent, events *EventManager) *Engine {
-	return &Engine{State: state, Bot: bot, Events: events}
+	return &Engine{
+		State:  state,
+		Bot:    bot,
+		Events: events,
+		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
 }
 
 // Run blocks, running the game loop until ctx is cancelled. Call in a goroutine.
@@ -124,7 +131,7 @@ func (e *Engine) tick() {
 	// Check for and resolve combat in any system where both sides are present.
 	for _, sys := range e.State.Systems {
 		if humanForcesPresent(e.State, sys) && alienForcesPresent(e.State, sys) {
-			Resolve(e.State, sys)
+			Resolve(e.rng, e.State, sys)
 		}
 	}
 

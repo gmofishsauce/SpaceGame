@@ -293,7 +293,7 @@ export class UIController {
         // Cancel puts the player back into destination-selection mode
         modal.content.appendChild(this._cancelButton(() => {
             modal.overlay.remove()
-            this.starMap.enterDestinationMode(fleetId, originId)
+            this.starMap.enterSelectionMode('fleet', fleetId, originId)
         }))
 
         document.body.appendChild(modal.overlay)

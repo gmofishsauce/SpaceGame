@@ -2,7 +2,6 @@ package game
 
 import (
 	"sort"
-	"sync"
 )
 
 // BotAgent is the interface the engine uses to drive the alien side.
@@ -32,10 +31,7 @@ type BotCommand struct {
 
 // DefaultBot implements the built-in alien bot. (FR-062, FR-063)
 // Strategy: move all available alien fleets toward the nearest human-held system.
-type DefaultBot struct {
-	mu      sync.Mutex
-	targets []string // system IDs prioritized for attack (sorted by dist from alien entry)
-}
+type DefaultBot struct{}
 
 // NewDefaultBot creates an initialized DefaultBot.
 func NewDefaultBot() *DefaultBot {

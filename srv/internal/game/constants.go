@@ -26,8 +26,6 @@ const (
 
 	// Alien spawn behavior (G-1)
 	AlienSpawnIntervalYears = 20.0 // in-game years between alien force arrivals
-	AlienInitialUnits       = 15  // total units placed at each entry point at game start
-	AlienSpawnUnitsPerWave  = 10  // total units added per spawn event
 
 	// Alien exhaustion (FR-055)
 	AlienExhaustionThreshold = 400 // cumulative alien units destroyed → exhaustion

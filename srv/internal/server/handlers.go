@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/gmofishsauce/SpaceGame/srv/internal/game"
 )
+
+var clientSeq atomic.Int64
 
 // handleStars returns the static star positions for Three.js rendering. (FR-019)
 // Response is cached for 24 hours since positions never change.
@@ -92,7 +95,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	clientID := fmt.Sprintf("client-%s", r.RemoteAddr)
+	clientID := fmt.Sprintf("client-%d", clientSeq.Add(1))
 	ch := s.events.Register(clientID)
 	defer s.events.Unregister(clientID)
 

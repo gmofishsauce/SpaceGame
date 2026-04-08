@@ -100,9 +100,9 @@ func TestCheckVictory_AlienCapturesEarth(t *testing.T) {
 }
 
 func TestCheckVictory_AlienCapturesFraction(t *testing.T) {
-	// 5 total systems; 2 alien-held = 40% which equals AlienWinCaptureFraction.
+	// 5 initial human systems; 2 alien-held = 40% which equals AlienWinCaptureFraction.
 	st := newMinimalState()
-	for _, id := range []string{"sys-b", "sys-c", "sys-d", "sys-e"} {
+	for _, id := range []string{"sys-b", "sys-c", "sys-d"} {
 		sys := &StarSystem{
 			ID:              id,
 			DisplayName:     id,
@@ -113,6 +113,7 @@ func TestCheckVictory_AlienCapturesFraction(t *testing.T) {
 		}
 		st.Systems[id] = sys
 		st.SystemOrder = append(st.SystemOrder, id)
+		st.Human.InitialSystemIDs = append(st.Human.InitialSystemIDs, id)
 	}
 	st.Systems["sys-b"].Status = StatusAlien
 	st.Systems["sys-c"].Status = StatusAlien // 2/5 = 0.40
@@ -127,9 +128,9 @@ func TestCheckVictory_AlienCapturesFraction(t *testing.T) {
 }
 
 func TestCheckVictory_AlienJustBelowFraction(t *testing.T) {
-	// 5 total systems; 1 alien-held = 20% < 40%; Sol still human.
+	// 5 initial human systems; 1 alien-held = 20% < 40%; Sol still human.
 	st := newMinimalState()
-	for _, id := range []string{"sys-b", "sys-c", "sys-d", "sys-e"} {
+	for _, id := range []string{"sys-b", "sys-c", "sys-d"} {
 		sys := &StarSystem{
 			ID:              id,
 			Status:          StatusHuman,
@@ -139,6 +140,7 @@ func TestCheckVictory_AlienJustBelowFraction(t *testing.T) {
 		}
 		st.Systems[id] = sys
 		st.SystemOrder = append(st.SystemOrder, id)
+		st.Human.InitialSystemIDs = append(st.Human.InitialSystemIDs, id)
 	}
 	st.Systems["sys-b"].Status = StatusAlien // 1/5 = 20%
 
@@ -663,8 +665,7 @@ func TestApplyEconomicCombatPenalty_ReducesEconLevel(t *testing.T) {
 	sys.Wealth = 100
 	sys.EconGrowthYear = 500
 
-	initialGrowthYear := sys.EconGrowthYear
-	ApplyEconomicCombatPenalty(st, sys)
+	ApplyEconomicCombatPenalty(rand.New(rand.NewSource(1)), st, sys)
 
 	if sys.EconLevel != 2 {
 		t.Errorf("expected EconLevel=2 after penalty (was 3), got %d", sys.EconLevel)
@@ -675,9 +676,10 @@ func TestApplyEconomicCombatPenalty_ReducesEconLevel(t *testing.T) {
 	if sys.Wealth < 0 {
 		t.Errorf("expected Wealth ≥ 0 after penalty, got %.2f", sys.Wealth)
 	}
-	if sys.EconGrowthYear <= initialGrowthYear {
-		t.Errorf("expected EconGrowthYear reset past %.1f, got %.1f",
-			initialGrowthYear, sys.EconGrowthYear)
+	expected := st.Clock + EconGrowthIntervalYears
+	if sys.EconGrowthYear != expected {
+		t.Errorf("expected EconGrowthYear=%.1f (clock+interval), got %.1f",
+			expected, sys.EconGrowthYear)
 	}
 }
 
@@ -686,7 +688,7 @@ func TestApplyEconomicCombatPenalty_EconLevelFloorIsZero(t *testing.T) {
 	sys := st.Systems["alpha-centauri"]
 	sys.EconLevel = 0
 
-	ApplyEconomicCombatPenalty(st, sys)
+	ApplyEconomicCombatPenalty(rand.New(rand.NewSource(1)), st, sys)
 
 	if sys.EconLevel < 0 {
 		t.Errorf("EconLevel went below 0: got %d", sys.EconLevel)
@@ -706,7 +708,7 @@ func TestApplyEconomicCombatPenalty_WealthNeverNegative(t *testing.T) {
 			LocalUnits:     map[WeaponType]int{},
 		}
 		st.Systems["test"] = sys
-		ApplyEconomicCombatPenalty(st, sys)
+		ApplyEconomicCombatPenalty(rand.New(rand.NewSource(1)), st, sys)
 		if sys.Wealth < 0 {
 			t.Fatalf("iteration %d: wealth went negative: %.4f", i, sys.Wealth)
 		}
@@ -810,28 +812,3 @@ func TestArrivalYearFor_SolIsImmediate(t *testing.T) {
 // ---------------------------------------------------------------------------
 // TestAlienCompositionSumMatchesConstants
 //
-// Documents the known mismatch between AlienInitialUnits/AlienSpawnUnitsPerWave
-// and their corresponding composition maps. These constants are never read
-// by engine code, so the mismatch is a documentation bug — but the test makes
-// it visible in CI and will catch further divergence.
-// ---------------------------------------------------------------------------
-
-func TestAlienCompositionSumMatchesConstants(t *testing.T) {
-	initialSum := 0
-	for _, n := range AlienInitialComposition {
-		initialSum += n
-	}
-	if initialSum != AlienInitialUnits {
-		t.Errorf("AlienInitialComposition sums to %d but AlienInitialUnits = %d (see review)",
-			initialSum, AlienInitialUnits)
-	}
-
-	spawnSum := 0
-	for _, n := range AlienSpawnComposition {
-		spawnSum += n
-	}
-	if spawnSum != AlienSpawnUnitsPerWave {
-		t.Errorf("AlienSpawnComposition sums to %d but AlienSpawnUnitsPerWave = %d (see review)",
-			spawnSum, AlienSpawnUnitsPerWave)
-	}
-}

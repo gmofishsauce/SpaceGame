@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"time"
 )
 
 // combatUnit is a single unit participating in combat.
@@ -15,15 +14,13 @@ type combatUnit struct {
 
 // Resolve resolves all combat in the given system for the current tick.
 // It mutates system forces, logs events, and updates system status. (FR-049–FR-054a)
-func Resolve(state *GameState, sys *StarSystem) {
+func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 	humanUnits := collectHumanUnits(state, sys)
 	alienUnits := collectAlienUnits(state, sys)
 
 	if len(humanUnits) == 0 || len(alienUnits) == 0 {
 		return
 	}
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	// Step 1: Comm Laser reports alien arrival at c BEFORE any combat. (FR-053)
 	hasCommLaser := sys.LocalUnits[WeaponCommLaser] > 0
@@ -106,7 +103,7 @@ func Resolve(state *GameState, sys *StarSystem) {
 	draw := len(humanUnits) == 0 && len(alienUnits) == 0
 
 	// Apply economic combat penalty regardless of outcome. (FR-048)
-	ApplyEconomicCombatPenalty(state, sys)
+	ApplyEconomicCombatPenalty(rng, state, sys)
 
 	// Update system status and clear forces.
 	if alienWon || draw {
@@ -195,10 +192,6 @@ func hitProbability(attackerType, targetType WeaponType) float64 {
 func collectHumanUnits(state *GameState, sys *StarSystem) []combatUnit {
 	var units []combatUnit
 	for wt, count := range sys.LocalUnits {
-		def := WeaponDefs[wt]
-		if def.CommLaser {
-			continue // comm laser does not participate in combat
-		}
 		for i := 0; i < count; i++ {
 			units = append(units, combatUnit{weaponType: wt, owner: HumanOwner})
 		}
@@ -255,10 +248,7 @@ func extractAndSendReporters(state *GameState, sys *StarSystem, humanUnits *[]co
 			continue
 		}
 		// Remove reporters from this fleet (they flee before combat)
-		fleet.Units[WeaponReporter] = 0
-		if fleet.Units[WeaponReporter] == 0 {
-			delete(fleet.Units, WeaponReporter)
-		}
+		delete(fleet.Units, WeaponReporter)
 
 		// Remove reporter combatUnits from the human side
 		filtered := (*humanUnits)[:0]
@@ -339,10 +329,6 @@ func reconcileForces(state *GameState, sys *StarSystem, humanUnits, alienUnits [
 		if !WeaponDefs[u.weaponType].CanMove {
 			newLocal[u.weaponType]++
 		}
-	}
-	// Preserve comm laser (it wasn't in humanUnits — it was excluded from combat)
-	if cl := sys.LocalUnits[WeaponCommLaser]; cl > 0 {
-		newLocal[WeaponCommLaser] = cl
 	}
 	sys.LocalUnits = newLocal
 

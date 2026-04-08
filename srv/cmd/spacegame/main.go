@@ -45,7 +45,6 @@ func main() {
 		log.Fatalf("server: %v", err)
 	}
 	log.Printf("SpaceGame server stopped")
-	os.Exit(0)
 }
 
 func envOrDefault(key, def string) string {

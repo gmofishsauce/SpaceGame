@@ -62,6 +62,7 @@ const (
 	EventCommandExecuted EventType = "command_executed" // command successfully executed
 	EventCommandFailed   EventType = "command_failed"   // command impossible or ignored
 	EventReporterReturn  EventType = "reporter_return"  // reporter arrived at Earth
+	EventEconGrowth      EventType = "econ_growth"      // system econ level increased
 	EventAlienSpawn      EventType = "alien_spawn"      // internal only
 	EventAlienExhausted  EventType = "alien_exhausted"
 	EventGameOver        EventType = "game_over"
@@ -95,6 +96,11 @@ type ConstructionDetails struct {
 type CommandFailedDetails struct {
 	CommandType CommandType `json:"commandType"`
 	Reason      string      `json:"reason"`
+}
+
+// EconGrowthDetails is the payload for EventEconGrowth.
+type EconGrowthDetails struct {
+	NewLevel int `json:"newLevel"`
 }
 
 // FleetArrivalDetails is the payload for EventFleetArrival.

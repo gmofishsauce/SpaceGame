@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"time"
 )
 
 // AccumulateWealth adds wealth to each human-held system proportional to
@@ -27,14 +26,27 @@ func AdvanceEconLevels(state *GameState) {
 		if sys.EconLevel < 5 && state.Clock >= sys.EconGrowthYear {
 			sys.EconLevel++
 			sys.EconGrowthYear = state.Clock + EconGrowthIntervalYears
+
+			hasCommLaser := sys.LocalUnits[WeaponCommLaser] > 0
+			if hasCommLaser {
+				arrYear := arrivalYearFor(state.Clock, sys.DistFromSol, true)
+				state.RecordEvent(&GameEvent{
+					EventYear:   state.Clock,
+					ArrivalYear: arrYear,
+					SystemID:    sys.ID,
+					Type:        EventEconGrowth,
+					Description: fmt.Sprintf("%s economy grew to level %d", sys.DisplayName, sys.EconLevel),
+					CanReport:   true,
+					Details:     &EconGrowthDetails{NewLevel: sys.EconLevel},
+				})
+			}
 		}
 	}
 }
 
 // ApplyEconomicCombatPenalty reduces econ level by 1, destroys a random
 // fraction of wealth, and resets the growth clock. (FR-048)
-func ApplyEconomicCombatPenalty(state *GameState, sys *StarSystem) {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+func ApplyEconomicCombatPenalty(rng *rand.Rand, state *GameState, sys *StarSystem) {
 	if sys.EconLevel > 0 {
 		sys.EconLevel--
 	}
