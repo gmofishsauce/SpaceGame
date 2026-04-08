@@ -322,6 +322,27 @@
     }
 
     /* ------------------------------------------------------------------ */
+    /* Message log (below starfield)                                       */
+    /* ------------------------------------------------------------------ */
+    #message-log {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 300px;        /* leaves sidebar uncovered */
+      height: 140px;       /* room for ~4 event-entry lines */
+      background: rgba(0, 0, 10, 0.88);
+      border-top: 1px solid #224;
+      overflow-y: auto;
+      z-index: 100;
+    }
+    #message-log .msg-line {
+      padding: 2px 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Error toast                                                         */
     /* ------------------------------------------------------------------ */
     .error-toast {
@@ -340,7 +361,7 @@
       pointer-events: none;
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-DMOcUSPG.js"></script>
+  <script type="module" crossorigin src="/assets/index-CYoqq_MW.js"></script>
 </head>
 <body>
   <div id="year-display">Year: 0.0</div>
@@ -352,6 +373,12 @@
     </div>
     <div id="event-log"></div>
     <div id="debug-log" style="display:none;"></div>
+  </div>
+  <div id="message-log">
+    <div class="msg-line"><span class="evt-desc">Game initialised. Alien forces are approaching from deep space.</span></div>
+    <div class="msg-line"><span class="evt-desc">Build interceptors and comm lasers to extend your sensor range.</span></div>
+    <div class="msg-line"><span class="evt-desc">Send reporter fleets to unknown systems to establish early warning.</span></div>
+    <div class="msg-line"><span class="evt-desc">Good luck, commander.</span></div>
   </div>
 </body>
 </html>

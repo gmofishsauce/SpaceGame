@@ -262,46 +262,7 @@ export class StarMap {
         const star = this.stars[idx]
         const sys  = this.state.getKnownState(star.id)
 
-        // Extended popup (FR-021)
-        const popup = document.createElement('div')
-        popup.className = 'star-popup'
-
-        const nameDiv = document.createElement('div')
-        nameDiv.className = 'star-name'
-        nameDiv.textContent = star.displayName
-        popup.appendChild(nameDiv)
-
-        if (sys) {
-            const statusName = STATUS_NAMES[sys.knownStatus] ?? sys.knownStatus
-            const statusDiv = document.createElement('div')
-            statusDiv.className = 'star-status'
-            statusDiv.textContent =
-                `Status: ${statusName} (as of year ${sys.knownAsOfYear.toFixed(1)})`
-            popup.appendChild(statusDiv)
-
-            if (sys.knownEconLevel > 0) {
-                const econDiv = document.createElement('div')
-                econDiv.className = 'star-econ'
-                econDiv.textContent = `Economy: Level ${sys.knownEconLevel}`
-                popup.appendChild(econDiv)
-            }
-
-            const forcesText = this._formatForces(sys)
-            if (forcesText) {
-                const forcesDiv = document.createElement('div')
-                forcesDiv.className = 'star-forces'
-                forcesDiv.textContent = `Forces: ${forcesText}`
-                popup.appendChild(forcesDiv)
-            }
-        }
-
-        const popupAnchor = document.createElement('div')
-        popupAnchor.style.cssText = 'width:0;height:0;overflow:visible'
-        popupAnchor.appendChild(popup)
-
-        this.hoverPopup = new CSS2DObject(popupAnchor)
-        this.hoverPopup.position.set(star.x, star.y, star.z)
-        this.scene.add(this.hoverPopup)
+        this._writeMessageLog(star, sys)
 
         // Axis projection dashed lines (FR-022)
         const foot = new THREE.Vector3(star.x, 0, star.z)
@@ -314,17 +275,14 @@ export class StarMap {
     }
 
     _clearHoverElements() {
-        if (this.hoverPopup !== null) {
-            this.scene.remove(this.hoverPopup)
-            this.hoverPopup.element.remove()
-            this.hoverPopup = null
-        }
         for (const line of this.hoverLines) {
             this.scene.remove(line)
             line.geometry.dispose()
             line.material.dispose()
         }
         this.hoverLines = []
+        const log = document.getElementById('message-log')
+        if (log) log.innerHTML = ''
     }
 
     _makeDashedLine(a, b) {
@@ -350,6 +308,59 @@ export class StarMap {
             }
         }
         return parts.join(', ')
+    }
+
+    _writeMessageLog(star, sys) {
+        const log = document.getElementById('message-log')
+        if (!log) return
+        log.innerHTML = ''
+
+        // Line 1: name · status · econ level
+        const statusName = sys ? (STATUS_NAMES[sys.knownStatus] ?? sys.knownStatus) : 'Unknown'
+        const asOf       = sys ? ` (yr ${sys.knownAsOfYear.toFixed(1)})` : ''
+        const econ       = sys && sys.knownEconLevel > 0 ? `Economy: Level ${sys.knownEconLevel}` : ''
+
+        const line1 = document.createElement('div')
+        line1.className = 'msg-line'
+        line1.innerHTML =
+            `<span class="star-name">${star.displayName}</span>` +
+            `\u2002<span class="star-status">${statusName}${asOf}</span>` +
+            (econ ? `\u2002<span class="star-econ">${econ}</span>` : '')
+        log.appendChild(line1)
+
+        if (!sys) return
+
+        // Line 2: local stationary units
+        const localParts = []
+        if (sys.knownLocalUnits) {
+            for (const [type, count] of Object.entries(sys.knownLocalUnits)) {
+                if (count > 0) localParts.push(`${count} ${type.replace(/_/g, ' ')}`)
+            }
+        }
+        if (localParts.length > 0) {
+            const line2 = document.createElement('div')
+            line2.className = 'msg-line'
+            line2.innerHTML = `<span class="star-forces">Local units: ${localParts.join(',  ')}</span>`
+            log.appendChild(line2)
+        }
+
+        // Line 3: fleets present
+        const presentFleets = (sys.knownFleets ?? []).filter(f => !f.inTransit)
+        if (presentFleets.length > 0) {
+            const line3 = document.createElement('div')
+            line3.className = 'msg-line'
+            line3.innerHTML = `<span class="star-forces">Fleets: ${presentFleets.map(f => f.name).join(',  ')}</span>`
+            log.appendChild(line3)
+        }
+
+        // Line 4: fleets in transit to this system
+        const inboundFleets = (sys.knownFleets ?? []).filter(f => f.inTransit)
+        if (inboundFleets.length > 0) {
+            const line4 = document.createElement('div')
+            line4.className = 'msg-line'
+            line4.innerHTML = `<span class="star-forces">In transit: ${inboundFleets.map(f => f.name).join(',  ')}</span>`
+            log.appendChild(line4)
+        }
     }
 
     // -------------------------------------------------------------------------
