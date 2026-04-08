@@ -1,5 +1,9 @@
 # Requirements: BasicBot — External Alien Bot for SpaceGame
 Version: 0.2
+---
+
+This file is obsolete. It may be useful to establish context about the game design, but it has not been maintained and some design decisions have been made in the code only. The code itself is authoritative; this document is not.
+
 
 ---
 

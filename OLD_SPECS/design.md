@@ -3,6 +3,10 @@ Version: 0.1
 
 ---
 
+This file is obsolete. It may be useful to establish context about the game design, but it has not been maintained and some design decisions have been made in the code only. The code itself is authoritative; this document is not.
+
+---
+
 ## 1. Overview
 
 SpaceGame is a single-player, limited-information interstellar strategy game served as a single-page web application from a Go HTTP server running on localhost:8080. The player commands humanity's defenses against an alien invasion across the ~108 nearest real star systems, rendered in 3D using Three.js. The defining mechanic is that all information propagates at the speed of light: the player always commands based on stale intelligence, and combat results are only knowable if the player has pre-positioned reporter vessels. A built-in bot drives the alien side through a defined interface that permits future replacement. A single session runs 2–4 real hours and covers hundreds of in-game years.
