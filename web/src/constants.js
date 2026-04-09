@@ -11,8 +11,8 @@ export const STATUS_COLORS = {
 }
 export const SOL_COLOR = 0xffff88
 
-// EconWealthRate[level] = wealth units per in-game year = 2^level (indices 0..5)
-export const ECON_WEALTH_RATE = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+// EconWealthRate[level] = wealth units per in-game year = 2^level (indices 0..4)
+export const ECON_WEALTH_RATE = [1.0, 2.0, 4.0, 8.0, 16.0]
 
 // Mirrored weapon defs for UI display (costs and min levels)
 export const WEAPON_DEFS = {

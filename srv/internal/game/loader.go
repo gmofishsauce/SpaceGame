@@ -58,7 +58,7 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 		// Determine initial status (FR-006, FR-007)
 		if isSol {
 			sys.Status = StatusHuman
-			sys.EconLevel = 5
+			sys.EconLevel = 4
 			sys.Wealth = 64
 			sys.EconGrowthYear = EconGrowthIntervalYears // Sol already at max; won't grow
 			sys.LocalUnits[WeaponCommLaser] = 1
@@ -470,8 +470,8 @@ func gaussianEconLevel(rng *rand.Rand) int {
 	if iv < 1 {
 		return 1
 	}
-	if iv > 5 {
-		return 5
+	if iv > 4 {
+		return 4
 	}
 	return iv
 }

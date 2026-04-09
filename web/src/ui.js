@@ -172,12 +172,18 @@ export class UIController {
             '<thead><tr>' +
             '<th></th><th>System</th><th>Level</th><th>Wealth</th><th>Weapon</th>' +
             '</tr></thead>'
+
+        const checkAll = document.createElement('input')
+        checkAll.type = 'checkbox'
+        table.querySelector('thead th').appendChild(checkAll)
+
         const tbody = document.createElement('tbody')
 
         const rows = []
         for (const { star, sys } of humanSystems) {
-            const econLevel = sys.knownEconLevel ?? 0
-            const wealth    = sys.knownWealth    ?? 0
+            const econLevel  = sys.knownEconLevel ?? 0
+            const deltaYears = Math.max(0, this.state.getLocalYear() - (sys.knownAsOfYear ?? 0))
+            const wealth     = this.state.getProjectedWealth(star.id, deltaYears)
 
             const buildable = Object.entries(WEAPON_DEFS)
                 .filter(([, def]) => def.minLevel <= econLevel)
@@ -217,6 +223,10 @@ export class UIController {
             rows.push({ star, cb, sel })
         }
 
+        checkAll.addEventListener('change', () => {
+            for (const { cb } of rows) cb.checked = checkAll.checked
+        })
+
         table.appendChild(tbody)
         modal.content.appendChild(table)
 
@@ -240,7 +250,7 @@ export class UIController {
 
     showConstructDialog(star) {
         const sys            = this.state.getKnownState(star.id)
-        const econLevel      = sys?.knownEconLevel ?? (star.isSol ? 5 : 0)
+        const econLevel      = sys?.knownEconLevel ?? (star.isSol ? 4 : 0)
         const travelYears    = star.isSol ? 0 : (star.distFromSol / CommandSpeedC)
         const projWealth     = this.state.getProjectedWealth(star.id, travelYears)
 

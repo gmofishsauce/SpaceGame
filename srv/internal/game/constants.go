@@ -56,8 +56,8 @@ const (
 )
 
 // EconWealthRate[level] = wealth units accumulated per in-game year = 2^level. (FR-046)
-// Indices 0–5.
-var EconWealthRate = [6]float64{1.0, 2.0, 4.0, 8.0, 16.0, 32.0}
+// Indices 0–4.
+var EconWealthRate = [5]float64{1.0, 2.0, 4.0, 8.0, 16.0}
 
 // WeaponDefs defines all weapon/device type parameters. (FR-040, FR-050)
 // AttackPower and Vulnerability use: 0=none, 1=low, 3=medium, 10=high.
