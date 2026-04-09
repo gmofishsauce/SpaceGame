@@ -70,16 +70,14 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 		}
 
 		// Remove casualties (end of round — parallel resolution).
-		removed := uniqueIndices(toDestroyAlien)
-		for i := len(removed) - 1; i >= 0; i-- {
-			idx := removed[i]
+		// uniqueIndices returns indices sorted descending; iterating forward
+		// removes highest indices first, keeping lower indices valid.
+		for _, idx := range uniqueIndices(toDestroyAlien) {
 			alienLosses[alienUnits[idx].weaponType]++
 			state.Alien.TotalLost++
 			alienUnits = append(alienUnits[:idx], alienUnits[idx+1:]...)
 		}
-		removed = uniqueIndices(toDestroyHuman)
-		for i := len(removed) - 1; i >= 0; i-- {
-			idx := removed[i]
+		for _, idx := range uniqueIndices(toDestroyHuman) {
 			humanLosses[humanUnits[idx].weaponType]++
 			humanUnits = append(humanUnits[:idx], humanUnits[idx+1:]...)
 		}
