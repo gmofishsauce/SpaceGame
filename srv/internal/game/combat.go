@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 )
 
 // combatUnit is a single unit participating in combat.
@@ -434,8 +435,6 @@ func uniqueIndices(indices []int) []int {
 		}
 	}
 	// Sort descending so removal from slice works back-to-front
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
 	return out
 }

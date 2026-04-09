@@ -166,6 +166,32 @@ export class UIController {
             return
         }
 
+        // "Set all" control
+        const weaponsByDescCost = Object.entries(WEAPON_DEFS)
+            .sort(([, a], [, b]) => b.cost - a.cost)
+
+        const setAllRow = document.createElement('div')
+        setAllRow.className = 'build-all-setall'
+
+        const setAllLabel = document.createElement('span')
+        setAllLabel.textContent = 'Set all: '
+        setAllRow.appendChild(setAllLabel)
+
+        const setAllSel = document.createElement('select')
+        setAllSel.className = 'build-all-select'
+
+        ;[['', '— choose —'], ['best', 'Best affordable'],
+          ...weaponsByDescCost.map(([id, def]) => [id, `${def.displayName} (${def.cost})`])
+        ].forEach(([val, label]) => {
+            const opt = document.createElement('option')
+            opt.value = val
+            opt.textContent = label
+            setAllSel.appendChild(opt)
+        })
+
+        setAllRow.appendChild(setAllSel)
+        modal.content.appendChild(setAllRow)
+
         const table = document.createElement('table')
         table.className = 'build-all-table'
         table.innerHTML =
@@ -220,11 +246,32 @@ export class UIController {
             row.appendChild(selTd)
 
             tbody.appendChild(row)
-            rows.push({ star, cb, sel })
+            rows.push({ star, cb, sel, wealth })
         }
 
         checkAll.addEventListener('change', () => {
             for (const { cb } of rows) cb.checked = checkAll.checked
+        })
+
+        setAllSel.addEventListener('change', () => {
+            const val = setAllSel.value
+            setAllSel.value = ''   // reset to prompt immediately
+            if (!val) return
+
+            for (const { sel, wealth } of rows) {
+                if (val === 'best') {
+                    for (const [typeId, def] of weaponsByDescCost) {
+                        if ([...sel.options].some(o => o.value === typeId) && def.cost <= wealth) {
+                            sel.value = typeId
+                            break
+                        }
+                    }
+                } else {
+                    if ([...sel.options].some(o => o.value === val)) {
+                        sel.value = val
+                    }
+                }
+            }
         })
 
         table.appendChild(tbody)
