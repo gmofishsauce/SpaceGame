@@ -27,6 +27,12 @@ func main() {
 	nearestCSV := envOrDefault("SPACEGAME_NEAREST_CSV", "nearest.csv")
 	planetsCSV := envOrDefault("SPACEGAME_PLANETS_CSV", "planets.csv")
 
+	if info, err := os.Stat(os.Args[0]); err == nil {
+		log.Printf("server v.%s started", info.ModTime().Format("20060102-150405"))
+	} else {
+		log.Printf("server v.unknown started")
+	}
+
 	state, err := game.Initialize(nearestCSV, planetsCSV)
 	if err != nil {
 		log.Fatalf("initializing game state: %v", err)

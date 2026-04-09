@@ -59,6 +59,7 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 		if isSol {
 			sys.Status = StatusHuman
 			sys.EconLevel = 5
+			sys.Wealth = 64
 			sys.EconGrowthYear = EconGrowthIntervalYears // Sol already at max; won't grow
 		} else if g.HasPlanets {
 			sys.Status = StatusHuman
@@ -76,6 +77,7 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 		// Initial known state = initial ground truth (G-4 assumption)
 		sys.KnownStatus = sys.Status
 		sys.KnownEconLevel = sys.EconLevel
+		sys.KnownWealth = sys.Wealth
 		sys.KnownAsOfYear = 0.0
 		sys.KnownLocalUnits = make(map[WeaponType]int)
 		sys.KnownFleetIDs = []string{}

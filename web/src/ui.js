@@ -19,6 +19,10 @@ export class UIController {
         this.yearDisplayEl  = document.getElementById('year-display')
         this.pauseOverlayEl = document.getElementById('pause-overlay')
 
+        document.getElementById('build-btn').addEventListener('click', () => {
+            this.showBuildAllDialog()
+        })
+
         // Local year interpolation at 100 ms (FR-014, NFR-U-1)
         setInterval(() => this._updateYearDisplay(), 100)
 
@@ -134,6 +138,100 @@ export class UIController {
             this.contextMenuEl.remove()
             this.contextMenuEl = null
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Build-all dialog (Build... button)
+    // -------------------------------------------------------------------------
+
+    showBuildAllDialog() {
+        // Snapshot human-held systems at dialog-open time
+        const humanSystems = this.state.stars
+            .filter(s => this.state.getKnownStatus(s.id) === 'human')
+            .map(s => ({ star: s, sys: this.state.getKnownState(s.id) }))
+            .filter(({ sys }) => sys != null)
+
+        const modal = this._makeModal()
+
+        const title = document.createElement('h2')
+        title.textContent = 'Build Orders'
+        modal.content.appendChild(title)
+
+        if (humanSystems.length === 0) {
+            const p = document.createElement('p')
+            p.textContent = 'No human-held systems available.'
+            modal.content.appendChild(p)
+            modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+            document.body.appendChild(modal.overlay)
+            return
+        }
+
+        const table = document.createElement('table')
+        table.className = 'build-all-table'
+        table.innerHTML =
+            '<thead><tr>' +
+            '<th></th><th>System</th><th>Level</th><th>Wealth</th><th>Weapon</th>' +
+            '</tr></thead>'
+        const tbody = document.createElement('tbody')
+
+        const rows = []
+        for (const { star, sys } of humanSystems) {
+            const econLevel = sys.knownEconLevel ?? 0
+            const wealth    = sys.knownWealth    ?? 0
+
+            const buildable = Object.entries(WEAPON_DEFS)
+                .filter(([, def]) => def.minLevel <= econLevel)
+
+            const row = document.createElement('tr')
+
+            const cbTd = document.createElement('td')
+            const cb   = document.createElement('input')
+            cb.type = 'checkbox'
+            cbTd.appendChild(cb)
+            row.appendChild(cbTd)
+
+            const nameTd = document.createElement('td')
+            nameTd.textContent = star.displayName
+            row.appendChild(nameTd)
+
+            const levelTd = document.createElement('td')
+            levelTd.textContent = econLevel
+            row.appendChild(levelTd)
+
+            const wealthTd = document.createElement('td')
+            wealthTd.textContent = wealth.toFixed(1)
+            row.appendChild(wealthTd)
+
+            const selTd = document.createElement('td')
+            const sel   = document.createElement('select')
+            for (const [typeId, def] of buildable) {
+                const opt       = document.createElement('option')
+                opt.value       = typeId
+                opt.textContent = `${def.displayName} (${def.cost})`
+                sel.appendChild(opt)
+            }
+            selTd.appendChild(sel)
+            row.appendChild(selTd)
+
+            tbody.appendChild(row)
+            rows.push({ star, cb, sel })
+        }
+
+        table.appendChild(tbody)
+        modal.content.appendChild(table)
+
+        const okBtn = document.createElement('button')
+        okBtn.textContent = 'OK'
+        okBtn.addEventListener('click', () => {
+            modal.overlay.remove()
+            for (const { star, cb, sel } of rows) {
+                if (cb.checked) this._sendConstruct(star.id, sel.value)
+            }
+        })
+        modal.content.appendChild(okBtn)
+        modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+
+        document.body.appendChild(modal.overlay)
     }
 
     // -------------------------------------------------------------------------

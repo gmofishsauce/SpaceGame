@@ -343,6 +343,48 @@
     }
 
     /* ------------------------------------------------------------------ */
+    /* Build-all dialog                                                   */
+    /* ------------------------------------------------------------------ */
+    .build-all-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-bottom: 14px;
+    }
+    .build-all-table th {
+      text-align: left;
+      color: #557;
+      padding: 4px 6px;
+      border-bottom: 1px solid #224;
+    }
+    .build-all-table td {
+      padding: 5px 6px;
+      border-bottom: 1px solid #112;
+      color: #999;
+    }
+    .build-all-table select {
+      background: #111128;
+      color: #99b;
+      border: 1px solid #446;
+      border-radius: 3px;
+      padding: 3px 6px;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .build-all-table select:focus { outline: none; border-color: #66a; }
+
+    /* ------------------------------------------------------------------ */
+    /* Build button (upper-right of starfield)                            */
+    /* ------------------------------------------------------------------ */
+    #build-btn {
+      position: fixed;
+      top: 12px;
+      right: 312px;   /* clears the 300px sidebar + 12px gap */
+      z-index: 100;
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Error toast                                                         */
     /* ------------------------------------------------------------------ */
     .error-toast {
@@ -364,6 +406,7 @@
 </head>
 <body>
   <div id="year-display">Year: 0.0</div>
+  <button id="build-btn">Build&#x2026;</button>
   <div id="selection-banner"></div>
   <div id="pause-overlay">&#9208; PAUSED</div>
   <div id="sidebar">

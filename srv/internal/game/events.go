@@ -164,11 +164,16 @@ func systemToMap(sys *StarSystem) map[string]interface{} {
 			knownUnits[string(wt)] = n
 		}
 	}
+	wealth := sys.KnownWealth
+	if sys.ID == "sol" {
+		wealth = sys.Wealth // Sol: always ground truth (FR-023)
+	}
 	return map[string]interface{}{
 		"systemId":        sys.ID,
 		"knownStatus":     string(sys.KnownStatus),
 		"knownAsOfYear":   sys.KnownAsOfYear,
 		"knownEconLevel":  sys.KnownEconLevel,
+		"knownWealth":     wealth,
 		"knownLocalUnits": knownUnits,
 		"knownFleets":     sys.KnownFleetIDs,
 	}
@@ -186,6 +191,10 @@ func fullStateMap(state *GameState) map[string]interface{} {
 				knownUnits[string(wt)] = n
 			}
 		}
+		wealth := sys.KnownWealth
+		if sys.ID == "sol" {
+			wealth = sys.Wealth // Sol: always ground truth (FR-023)
+		}
 		systems = append(systems, map[string]interface{}{
 			"id":              sys.ID,
 			"displayName":     sys.DisplayName,
@@ -198,6 +207,7 @@ func fullStateMap(state *GameState) map[string]interface{} {
 			"knownStatus":     string(sys.KnownStatus),
 			"knownAsOfYear":   sys.KnownAsOfYear,
 			"knownEconLevel":  sys.KnownEconLevel,
+			"knownWealth":     wealth,
 			"knownLocalUnits": knownUnits,
 			"knownFleets":     sys.KnownFleetIDs,
 		})
