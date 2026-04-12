@@ -63,7 +63,7 @@ func (m *EventManager) BroadcastMatured(state *GameState) {
 
 		// Also send updated known state for the event's system
 		if sys, ok := state.Systems[evt.SystemID]; ok {
-			sysPayload := sseFrame("system_update", systemToMap(sys))
+			sysPayload := sseFrame("system_update", systemToMap(state, sys))
 			m.broadcastBytes(sysPayload)
 		}
 	}
@@ -157,7 +157,7 @@ func eventToMap(evt *GameEvent) map[string]interface{} {
 }
 
 // systemToMap converts a system's known-state fields to a map for JSON encoding.
-func systemToMap(sys *StarSystem) map[string]interface{} {
+func systemToMap(state *GameState, sys *StarSystem) map[string]interface{} {
 	knownUnits := map[string]int{}
 	for wt, n := range sys.KnownLocalUnits {
 		if n > 0 {
@@ -175,7 +175,43 @@ func systemToMap(sys *StarSystem) map[string]interface{} {
 		"knownEconLevel":  sys.KnownEconLevel,
 		"knownWealth":     wealth,
 		"knownLocalUnits": knownUnits,
-		"knownFleets":     sys.KnownFleetIDs,
+		"knownFleets":     buildKnownFleets(state, sys),
+	}
+}
+
+// buildKnownFleets returns player-visible fleet objects for a system.
+// Sol uses ground-truth FleetIDs; all other systems use KnownFleetIDs.
+func buildKnownFleets(state *GameState, sys *StarSystem) []map[string]interface{} {
+	fleetIDs := sys.KnownFleetIDs
+	if sys.ID == "sol" {
+		fleetIDs = sys.FleetIDs
+	}
+	result := []map[string]interface{}{}
+	for _, fid := range fleetIDs {
+		f := state.Fleets[fid]
+		if f != nil && f.Owner == HumanOwner {
+			result = append(result, fleetToMap(f))
+		}
+	}
+	return result
+}
+
+// fleetToMap converts a Fleet to a map suitable for JSON encoding.
+func fleetToMap(f *Fleet) map[string]interface{} {
+	units := map[string]int{}
+	for wt, n := range f.Units {
+		if n > 0 {
+			units[string(wt)] = n
+		}
+	}
+	return map[string]interface{}{
+		"id":            f.ID,
+		"name":          f.Name,
+		"owner":         string(f.Owner),
+		"units":         units,
+		"inTransit":     f.InTransit,
+		"destinationId": f.DestID,
+		"arrivalYear":   f.ArrivalYear,
 	}
 }
 
@@ -209,7 +245,7 @@ func fullStateMap(state *GameState) map[string]interface{} {
 			"knownEconLevel":  sys.KnownEconLevel,
 			"knownWealth":     wealth,
 			"knownLocalUnits": knownUnits,
-			"knownFleets":     sys.KnownFleetIDs,
+			"knownFleets":     buildKnownFleets(state, sys),
 		})
 	}
 

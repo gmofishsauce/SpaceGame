@@ -26,10 +26,9 @@ type GameState struct {
 	Human HumanFaction
 	Alien AlienFaction
 
-	nextFleetNum    int
-	nextEventID     int
-	nextCmdID       int
-	knownStateIdx   int // index into Events: all events before this are already applied
+	nextFleetNum int
+	nextEventID  int
+	nextCmdID    int
 }
 
 // StarSystem is one game entity (one or more co-located stars treated as one system).
@@ -238,18 +237,21 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 
 // UpdateKnownStates applies all newly matured events (arrivalYear ≤ clock,
 // !AppliedToKnown) to each system's KnownState fields. (FR-018)
+//
+// Events are stored in EventYear order, not ArrivalYear order, so we must
+// scan the full slice rather than stopping at the first unmatured entry.
 func (s *GameState) UpdateKnownStates(clock float64) {
-	for s.knownStateIdx < len(s.Events) {
-		evt := s.Events[s.knownStateIdx]
-		if evt.ArrivalYear > clock || evt.ArrivalYear >= math.MaxFloat64 {
-			break
+	for _, evt := range s.Events {
+		if evt.AppliedToKnown {
+			continue
 		}
-		sys, ok := s.Systems[evt.SystemID]
-		if ok {
+		if evt.ArrivalYear > clock || evt.ArrivalYear >= math.MaxFloat64 {
+			continue
+		}
+		if sys, ok := s.Systems[evt.SystemID]; ok {
 			applyEventToKnownState(sys, evt)
 		}
 		evt.AppliedToKnown = true
-		s.knownStateIdx++
 	}
 }
 
