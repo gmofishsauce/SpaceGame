@@ -221,10 +221,12 @@ export class StarMap {
             if (!this.selectionMode) return
             const star = this._getStarAtEvent(e)
             if (star && this.ui) {
-                const mode = this.selectionMode
+                const mode     = this.selectionMode
+                const fleetId  = this.destinationFleetId
+                const originId = this.destinationOriginId
                 this.exitSelectionMode()
                 if (mode === 'fleet') {
-                    this.ui.confirmFleetDestination(star)
+                    this.ui.confirmFleetDestination(star, fleetId, originId)
                 } else {
                     this.ui.showConstructDialog(star)
                 }

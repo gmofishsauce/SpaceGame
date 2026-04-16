@@ -9,7 +9,6 @@ export class UIController {
         this.yearDisplayEl  = null
         this.pauseOverlayEl = null
         this.contextMenuEl  = null
-        this.messageLogEl   = null
 
         state.on('stateLoaded', ()     => this._syncPauseOverlay())
         state.on('clockSync',   ()     => this._syncPauseOverlay())
@@ -19,7 +18,6 @@ export class UIController {
     init() {
         this.yearDisplayEl  = document.getElementById('year-display')
         this.pauseOverlayEl = document.getElementById('pause-overlay')
-        this.messageLogEl   = document.getElementById('message-log')
 
         document.getElementById('build-btn').addEventListener('click', () => {
             this.showBuildAllDialog()
@@ -377,52 +375,38 @@ export class UIController {
     // -------------------------------------------------------------------------
 
     showFleetCommandDialog(star, fleets) {
-        const savedHTML = this.messageLogEl.innerHTML
-        const restore   = () => { this.messageLogEl.innerHTML = savedHTML }
+        const modal = this._makeModal()
 
-        this.messageLogEl.innerHTML = ''
+        const title = document.createElement('h2')
+        title.textContent = `Command Fleet from ${star.displayName}`
+        modal.content.appendChild(title)
 
-        const header = document.createElement('div')
-        header.className = 'msg-line'
-        const nameSpan = document.createElement('span')
-        nameSpan.className = 'evt-system'
-        nameSpan.textContent = `Command Fleet from ${star.displayName}`
-        header.appendChild(nameSpan)
-        this.messageLogEl.appendChild(header)
+        const note = document.createElement('p')
+        note.className   = 'dialog-note'
+        note.textContent = 'Select a fleet, then click a destination star.'
+        modal.content.appendChild(note)
 
-        const note = document.createElement('div')
-        note.className = 'msg-line'
-        const noteSpan = document.createElement('span')
-        noteSpan.className = 'evt-desc'
-        noteSpan.textContent = 'Select a fleet, then click a destination star.'
-        note.appendChild(noteSpan)
-        this.messageLogEl.appendChild(note)
+        const list = document.createElement('ul')
+        list.className = 'fleet-list'
 
         for (const fleet of fleets) {
-            const item = document.createElement('div')
-            item.className = 'msg-line'
-            item.style.cursor = 'pointer'
-            const span = document.createElement('span')
-            span.className = 'evt-system'
-            span.textContent = `\u25b6 ${fleet.name} \u2014 ${this._formatUnits(fleet.units)}`
-            item.appendChild(span)
+            const item = document.createElement('li')
+            item.className   = 'fleet-item'
+            item.textContent = `${fleet.name} \u2014 ${this._formatUnits(fleet.units)}`
             item.addEventListener('click', () => {
-                restore()
+                modal.overlay.remove()
                 this.starMap.enterSelectionMode('fleet', fleet.id, star.id)
             })
-            this.messageLogEl.appendChild(item)
+            list.appendChild(item)
         }
 
-        const cancelLine = document.createElement('div')
-        cancelLine.className = 'msg-line'
-        cancelLine.appendChild(this._cancelButton(restore))
-        this.messageLogEl.appendChild(cancelLine)
+        modal.content.appendChild(list)
+        modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+        document.body.appendChild(modal.overlay)
     }
 
     // Called by StarMap when the user clicks a destination star (FR-038, A-5)
-    confirmFleetDestination(destStar) {
-        const fleetId  = this.starMap.destinationFleetId
-        const originId = this.starMap.destinationOriginId
+    confirmFleetDestination(destStar, fleetId, originId) {
 
         const originStar       = this.state.stars.find(s => s.id === originId)
         const commandYears     = (originStar && !originStar.isSol)
