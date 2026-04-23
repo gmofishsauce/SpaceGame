@@ -85,19 +85,25 @@ func ExecuteConstruct(state *GameState, sys *StarSystem, wt WeaponType, qty int)
 	sys.Wealth -= def.Cost * float64(qty)
 
 	if def.CanMove {
-		// Create a named fleet for interstellar-capable units
-		fleetID := state.NewFleetID()
-		fleetName := state.NewFleetName()
-		fleet := &Fleet{
-			ID:         fleetID,
-			Name:       fleetName,
-			Owner:      HumanOwner,
-			Units:      map[WeaponType]int{wt: qty},
-			LocationID: sys.ID,
-			InTransit:  false,
+		// Add newly built mobile units to the system's primary (1st) fleet.
+		// If the primary fleet has been sent away, create a new one.
+		primary, ok := state.Fleets[sys.PrimaryFleetID]
+		if ok && !primary.InTransit && primary.LocationID == sys.ID {
+			primary.Units[wt] += qty
+		} else {
+			fleetID := state.NewFleetID()
+			fleet := &Fleet{
+				ID:         fleetID,
+				Name:       sys.DisplayName + "-1st Fleet",
+				Owner:      HumanOwner,
+				Units:      map[WeaponType]int{wt: qty},
+				LocationID: sys.ID,
+				InTransit:  false,
+			}
+			state.Fleets[fleetID] = fleet
+			sys.FleetIDs = append(sys.FleetIDs, fleetID)
+			sys.PrimaryFleetID = fleetID
 		}
-		state.Fleets[fleetID] = fleet
-		sys.FleetIDs = append(sys.FleetIDs, fleetID)
 	} else {
 		sys.LocalUnits[wt] += qty
 	}
@@ -117,6 +123,85 @@ func ExecuteConstruct(state *GameState, sys *StarSystem, wt WeaponType, qty int)
 		CanReport:   hasCommLaser,
 		Details:     &ConstructionDetails{WeaponType: wt, Quantity: qty},
 	})
+}
+
+// ordinal returns the English ordinal string for n (1→"1st", 2→"2nd", etc.).
+func ordinal(n int) string {
+	if n >= 11 && n <= 13 {
+		return fmt.Sprintf("%dth", n)
+	}
+	switch n % 10 {
+	case 1:
+		return fmt.Sprintf("%dst", n)
+	case 2:
+		return fmt.Sprintf("%dnd", n)
+	case 3:
+		return fmt.Sprintf("%drd", n)
+	default:
+		return fmt.Sprintf("%dth", n)
+	}
+}
+
+// ExecuteCreateFleet creates a new empty named fleet at sys.
+func ExecuteCreateFleet(state *GameState, sys *StarSystem) error {
+	if sys.Status != StatusHuman {
+		return fmt.Errorf("system %q is not human-held", sys.ID)
+	}
+	sys.FleetCount++
+	fleetID := state.NewFleetID()
+	fleet := &Fleet{
+		ID:         fleetID,
+		Name:       fmt.Sprintf("%s-%s Fleet", sys.DisplayName, ordinal(sys.FleetCount)),
+		Owner:      HumanOwner,
+		Units:      map[WeaponType]int{},
+		LocationID: sys.ID,
+		InTransit:  false,
+	}
+	state.Fleets[fleetID] = fleet
+	sys.FleetIDs = append(sys.FleetIDs, fleetID)
+	return nil
+}
+
+// ExecuteReassign moves units from SourceFleetID to TargetFleetID at sys.
+// Both fleets must be stationed (not in transit) at sys.
+// If the source fleet becomes empty after the transfer it is dissolved.
+func ExecuteReassign(state *GameState, sys *StarSystem, cmd *PendingCommand) error {
+	src, ok := state.Fleets[cmd.SourceFleetID]
+	if !ok {
+		return fmt.Errorf("source fleet %q not found", cmd.SourceFleetID)
+	}
+	if src.InTransit || src.LocationID != sys.ID {
+		return fmt.Errorf("source fleet %q is not stationed at %q", cmd.SourceFleetID, sys.ID)
+	}
+	dst, ok := state.Fleets[cmd.TargetFleetID]
+	if !ok {
+		return fmt.Errorf("target fleet %q not found", cmd.TargetFleetID)
+	}
+	if dst.InTransit || dst.LocationID != sys.ID {
+		return fmt.Errorf("target fleet %q is not stationed at %q", cmd.TargetFleetID, sys.ID)
+	}
+	for wt, n := range cmd.ReassignUnits {
+		if src.Units[wt] < n {
+			return fmt.Errorf("source fleet has %d %s, need %d", src.Units[wt], wt, n)
+		}
+	}
+	for wt, n := range cmd.ReassignUnits {
+		src.Units[wt] -= n
+		dst.Units[wt] += n
+	}
+	// Dissolve source fleet if now empty
+	total := 0
+	for _, n := range src.Units {
+		total += n
+	}
+	if total == 0 {
+		sys.FleetIDs = removeString(sys.FleetIDs, src.ID)
+		if sys.PrimaryFleetID == src.ID {
+			sys.PrimaryFleetID = ""
+		}
+		delete(state.Fleets, src.ID)
+	}
+	return nil
 }
 
 // ProjectedWealth returns the estimated accumulated wealth at futureYear,

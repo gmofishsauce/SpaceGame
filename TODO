@@ -1,0 +1,5 @@
+Fix go tests.
+
+Make ^C reliable in server.
+
+Fix the  0.8c problem in the command queue.

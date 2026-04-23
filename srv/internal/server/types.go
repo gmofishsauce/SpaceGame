@@ -6,12 +6,15 @@ import (
 
 // CommandRequest is the JSON body for POST /api/command.
 type CommandRequest struct {
-	Type       game.CommandType `json:"type"`
-	SystemID   string           `json:"systemId"`
-	WeaponType game.WeaponType  `json:"weaponType,omitempty"`
-	Quantity   int              `json:"quantity,omitempty"`
-	FleetID    string           `json:"fleetId,omitempty"`
-	DestID     string           `json:"destinationId,omitempty"`
+	Type          game.CommandType `json:"type"`
+	SystemID      string           `json:"systemId"`
+	WeaponType    game.WeaponType  `json:"weaponType,omitempty"`
+	Quantity      int              `json:"quantity,omitempty"`
+	FleetID       string           `json:"fleetId,omitempty"`
+	DestID        string           `json:"destinationId,omitempty"`
+	SourceFleetID string           `json:"sourceFleetId,omitempty"`
+	TargetFleetID string           `json:"targetFleetId,omitempty"`
+	Units         map[string]int   `json:"units,omitempty"`
 }
 
 // CommandResponse is the JSON body returned by POST /api/command.

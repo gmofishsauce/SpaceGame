@@ -151,13 +151,16 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := &game.PendingCommand{
-		OriginID:   "sol",
-		TargetID:   req.SystemID,
-		Type:       req.Type,
-		WeaponType: req.WeaponType,
-		Quantity:   req.Quantity,
-		FleetID:    req.FleetID,
-		DestID:     req.DestID,
+		OriginID:      "sol",
+		TargetID:      req.SystemID,
+		Type:          req.Type,
+		WeaponType:    req.WeaponType,
+		Quantity:      req.Quantity,
+		FleetID:       req.FleetID,
+		DestID:        req.DestID,
+		SourceFleetID: req.SourceFleetID,
+		TargetFleetID: req.TargetFleetID,
+		ReassignUnits: convertUnits(req.Units),
 	}
 
 	cmdID, arrivalYear, err := s.engine.EnqueueCommand(cmd)
@@ -330,6 +333,19 @@ func describePendingCommand(state *game.GameState, cmd *game.PendingCommand) str
 		}
 		return fmt.Sprintf("Order: Move %s to %s (arrives yr %.1f)",
 			fleetName, destName, cmd.ExecuteYear)
+	case game.CmdCreateFleet:
+		return fmt.Sprintf("Create fleet at %s (executes yr %.1f)", targetName, cmd.ExecuteYear)
+	case game.CmdReassign:
+		srcName := cmd.SourceFleetID
+		if f, ok := state.Fleets[cmd.SourceFleetID]; ok {
+			srcName = f.Name
+		}
+		dstName := cmd.TargetFleetID
+		if f, ok := state.Fleets[cmd.TargetFleetID]; ok {
+			dstName = f.Name
+		}
+		return fmt.Sprintf("Reassign units from %s to %s at %s (executes yr %.1f)",
+			srcName, dstName, targetName, cmd.ExecuteYear)
 	default:
 		return fmt.Sprintf("Command %s to %s (arrives yr %.1f)",
 			cmd.Type, targetName, cmd.ExecuteYear)
@@ -354,6 +370,18 @@ func fleetToDTO(f *game.Fleet) FleetDTO {
 		DepartYear:  f.DepartYear,
 		ArrivalYear: f.ArrivalYear,
 	}
+}
+
+// convertUnits converts a JSON string→int map to the game WeaponType→int map.
+func convertUnits(m map[string]int) map[game.WeaponType]int {
+	if m == nil {
+		return nil
+	}
+	out := map[game.WeaponType]int{}
+	for k, v := range m {
+		out[game.WeaponType(k)] = v
+	}
+	return out
 }
 
 func weaponMapToStringMap(m map[game.WeaponType]int) map[string]int {

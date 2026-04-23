@@ -94,6 +94,10 @@ export class UIController {
                     this._closeContextMenu()
                     this.showFleetCommandDialog(star, stationedFleets)
                 }))
+                menu.appendChild(this._menuItem('Fleets\u2026', () => {
+                    this._closeContextMenu()
+                    this.showManageFleetsDialog(star, stationedFleets)
+                }))
             }
         } else if (status === 'human') {
             // Non-Sol human system: fleet command only, never construction (FR-034)
@@ -102,6 +106,10 @@ export class UIController {
                 menu.appendChild(this._menuItem('Command Fleet\u2026', () => {
                     this._closeContextMenu()
                     this.showFleetCommandDialog(star, stationedFleets)
+                }))
+                menu.appendChild(this._menuItem('Fleets\u2026', () => {
+                    this._closeContextMenu()
+                    this.showManageFleetsDialog(star, stationedFleets)
                 }))
             } else {
                 menu.appendChild(this._disabledItem('No actions available'))
@@ -404,6 +412,192 @@ export class UIController {
         modal.content.appendChild(list)
         modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
         document.body.appendChild(modal.overlay)
+    }
+
+    // -------------------------------------------------------------------------
+    // Manage Fleets dialog
+    // -------------------------------------------------------------------------
+
+    showManageFleetsDialog(star, stationedFleets) {
+        const modal = this._makeModal()
+
+        const title = document.createElement('h2')
+        title.textContent = `Manage Fleets at ${star.displayName}`
+        modal.content.appendChild(title)
+
+        if (!star.isSol) {
+            const travelYears = star.distFromSol / CommandSpeedC
+            const note = document.createElement('p')
+            note.className = 'dialog-note'
+            note.textContent = `Commands travel at 0.8c — arrive in ${travelYears.toFixed(1)} years.`
+            modal.content.appendChild(note)
+        }
+
+        // Fleet roster table
+        const rosterTitle = document.createElement('h3')
+        rosterTitle.className = 'manage-section-title'
+        rosterTitle.textContent = 'Stationed Fleets'
+        modal.content.appendChild(rosterTitle)
+
+        const table = document.createElement('table')
+        table.className = 'fleet-roster-table'
+        table.innerHTML = '<thead><tr><th>Fleet</th><th>Units</th></tr></thead>'
+        const tbody = document.createElement('tbody')
+        for (const fleet of stationedFleets) {
+            const row = document.createElement('tr')
+            const nameTd = document.createElement('td')
+            nameTd.textContent = fleet.name
+            const unitsTd = document.createElement('td')
+            unitsTd.textContent = this._formatUnits(fleet.units) || '(empty)'
+            row.appendChild(nameTd)
+            row.appendChild(unitsTd)
+            tbody.appendChild(row)
+        }
+        table.appendChild(tbody)
+        modal.content.appendChild(table)
+
+        // Reassign section (only meaningful with 2+ fleets)
+        if (stationedFleets.length >= 2) {
+            modal.content.appendChild(this._makeReassignSection(star, stationedFleets, modal))
+        }
+
+        // Create Fleet button
+        const createBtn = document.createElement('button')
+        createBtn.textContent = 'Create Fleet'
+        createBtn.addEventListener('click', () => {
+            modal.overlay.remove()
+            this._sendCreateFleet(star.id)
+        })
+        modal.content.appendChild(createBtn)
+        modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+        document.body.appendChild(modal.overlay)
+    }
+
+    _makeReassignSection(star, fleets, modal) {
+        const section = document.createElement('div')
+        section.className = 'reassign-section'
+
+        const sectionTitle = document.createElement('h3')
+        sectionTitle.className = 'manage-section-title'
+        sectionTitle.textContent = 'Reassign Units'
+        section.appendChild(sectionTitle)
+
+        const selRow = document.createElement('div')
+        selRow.className = 'reassign-sel-row'
+
+        const srcLabel = document.createElement('label')
+        srcLabel.textContent = 'From: '
+        const srcSel = document.createElement('select')
+        srcSel.className = 'reassign-select'
+        for (const f of fleets) {
+            const opt = document.createElement('option')
+            opt.value = f.id
+            opt.textContent = f.name
+            srcSel.appendChild(opt)
+        }
+        srcLabel.appendChild(srcSel)
+        selRow.appendChild(srcLabel)
+
+        const dstLabel = document.createElement('label')
+        dstLabel.textContent = '  To: '
+        const dstSel = document.createElement('select')
+        dstSel.className = 'reassign-select'
+        for (const f of fleets) {
+            const opt = document.createElement('option')
+            opt.value = f.id
+            opt.textContent = f.name
+            dstSel.appendChild(opt)
+        }
+        if (dstSel.options.length > 1) dstSel.selectedIndex = 1
+        dstLabel.appendChild(dstSel)
+        selRow.appendChild(dstLabel)
+
+        section.appendChild(selRow)
+
+        // Unit quantity inputs — rebuilt whenever source fleet changes
+        const unitDiv = document.createElement('div')
+        unitDiv.className = 'unit-inputs'
+        section.appendChild(unitDiv)
+
+        const renderUnitInputs = () => {
+            unitDiv.innerHTML = ''
+            const srcFleet = fleets.find(f => f.id === srcSel.value)
+            const entries = Object.entries(srcFleet?.units ?? {}).filter(([, n]) => n > 0)
+            if (entries.length === 0) {
+                const p = document.createElement('p')
+                p.className = 'dialog-note'
+                p.textContent = 'Source fleet has no units.'
+                unitDiv.appendChild(p)
+                return
+            }
+            const t = document.createElement('table')
+            t.className = 'unit-qty-table'
+            t.innerHTML = '<thead><tr><th>Type</th><th>Available</th><th>Move</th></tr></thead>'
+            const tb = document.createElement('tbody')
+            for (const [wt, available] of entries) {
+                const row = document.createElement('tr')
+                const inp = document.createElement('input')
+                inp.type = 'number'
+                inp.min = 0
+                inp.max = available
+                inp.value = 0
+                inp.className = 'qty-input'
+                inp.dataset.weaponType = wt
+                row.innerHTML = `<td>${wt.replace(/_/g, ' ')}</td><td>${available}</td>`
+                const td = document.createElement('td')
+                td.appendChild(inp)
+                row.appendChild(td)
+                tb.appendChild(row)
+            }
+            t.appendChild(tb)
+            unitDiv.appendChild(t)
+        }
+
+        srcSel.addEventListener('change', renderUnitInputs)
+        renderUnitInputs()
+
+        const sendBtn = document.createElement('button')
+        sendBtn.textContent = 'Send Reassign Command'
+        sendBtn.addEventListener('click', () => {
+            if (srcSel.value === dstSel.value) {
+                this.showCommandError('Source and target fleet must be different.')
+                return
+            }
+            const units = {}
+            unitDiv.querySelectorAll('input[data-weapon-type]').forEach(inp => {
+                const n = parseInt(inp.value, 10)
+                if (n > 0) units[inp.dataset.weaponType] = n
+            })
+            if (Object.keys(units).length === 0) {
+                this.showCommandError('Select at least one unit to reassign.')
+                return
+            }
+            modal.overlay.remove()
+            this._sendReassign(star.id, srcSel.value, dstSel.value, units)
+        })
+        section.appendChild(sendBtn)
+        return section
+    }
+
+    async _sendCreateFleet(systemId) {
+        const resp = await this.api.sendCommand({
+            type: 'create_fleet',
+            systemId,
+        })
+        if (!resp.ok) { this.showCommandError(resp.error); return }
+        if (resp.pending) this.state.addPendingCommand(resp.pending)
+    }
+
+    async _sendReassign(systemId, sourceFleetId, targetFleetId, units) {
+        const resp = await this.api.sendCommand({
+            type: 'reassign',
+            systemId,
+            sourceFleetId,
+            targetFleetId,
+            units,
+        })
+        if (!resp.ok) { this.showCommandError(resp.error); return }
+        if (resp.pending) this.state.addPendingCommand(resp.pending)
     }
 
     // Called by StarMap when the user clicks a destination star (FR-038, A-5)

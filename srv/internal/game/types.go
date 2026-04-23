@@ -72,9 +72,11 @@ const (
 type CommandType string
 
 const (
-	CmdConstruct CommandType = "construct"
-	CmdMove      CommandType = "move"
-	CmdPause     CommandType = "pause"
+	CmdConstruct   CommandType = "construct"
+	CmdMove        CommandType = "move"
+	CmdPause       CommandType = "pause"
+	CmdCreateFleet CommandType = "create_fleet"
+	CmdReassign    CommandType = "reassign"
 )
 
 // CombatDetails is the type-specific payload for EventCombatOccurred.

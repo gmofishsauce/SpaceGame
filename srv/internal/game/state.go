@@ -46,6 +46,8 @@ type StarSystem struct {
 	EconGrowthYear float64 // game year at which next level-up occurs (reset on combat)
 	LocalUnits     map[WeaponType]int // stationary units (OrbitalDefense, Interceptor, CommLaser)
 	FleetIDs       []string           // IDs of fleets currently present
+	PrimaryFleetID string             // ID of this system's "1st Fleet" (receives new construction)
+	FleetCount     int               // number of fleets ever created here; drives ordinal naming
 
 	// Last known state — derived from reported events with arrivalYear ≤ currentClock.
 	KnownStatus     SystemStatus
@@ -93,9 +95,12 @@ type PendingCommand struct {
 	Type        CommandType
 	WeaponType  WeaponType  // for CmdConstruct
 	Quantity    int         // for CmdConstruct
-	FleetID     string      // for CmdMove
-	DestID      string      // for CmdMove
-	IsBot       bool
+	FleetID       string             // for CmdMove
+	DestID        string             // for CmdMove
+	SourceFleetID string             // for CmdReassign
+	TargetFleetID string             // for CmdReassign
+	ReassignUnits map[WeaponType]int // for CmdReassign
+	IsBot         bool
 }
 
 // HumanFaction holds human-side aggregate state.
@@ -219,6 +224,16 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 		// Remove from current system's fleet list
 		sys.FleetIDs = removeString(sys.FleetIDs, fleet.ID)
 		fleet.LocationID = ""
+
+	case CmdCreateFleet:
+		if err := ExecuteCreateFleet(s, sys); err != nil {
+			return err
+		}
+
+	case CmdReassign:
+		if err := ExecuteReassign(s, sys, cmd); err != nil {
+			return err
+		}
 
 	default:
 		return fmt.Errorf("unknown command type %q", cmd.Type)

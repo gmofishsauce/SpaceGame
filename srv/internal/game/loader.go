@@ -88,7 +88,7 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 		// human player has an intelligence capability from turn one.
 		if sys.Status == StatusHuman {
 			fid := state.NewFleetID()
-			fname := state.NewFleetName()
+			fname := sys.DisplayName + "-1st Fleet"
 			fleet := &Fleet{
 				ID:         fid,
 				Name:       fname,
@@ -100,6 +100,8 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 			state.Fleets[fid] = fleet
 			sys.FleetIDs = append(sys.FleetIDs, fid)
 			sys.KnownFleetIDs = append(sys.KnownFleetIDs, fid)
+			sys.PrimaryFleetID = fid
+			sys.FleetCount = 1
 
 			// Tuned for gameplay balance: every human-held system with planets
 			// starts with a Comm Laser (shipped with the colonists, so it exists
