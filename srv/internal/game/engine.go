@@ -117,6 +117,11 @@ func (e *Engine) tick() {
 		if cmd.ExecuteYear <= e.State.Clock {
 			if err := e.State.ApplyCommand(cmd); err != nil {
 				e.logCommandFailed(cmd, err)
+			} else if cmd.Type == CmdMove {
+				// Broadcast fleet departure so the client can render an in-transit arrow.
+				if f, ok := e.State.Fleets[cmd.FleetID]; ok && f.InTransit && f.Owner == HumanOwner {
+					e.Events.BroadcastFleetDeparted(f)
+				}
 			}
 		} else {
 			remaining = append(remaining, cmd)
@@ -210,6 +215,7 @@ func (e *Engine) processFleetArrivals() {
 		fleet.InTransit = false
 		fleet.LocationID = fleet.DestID
 		fleet.DestID = ""
+		fleet.SourceID = ""
 
 		dest.FleetIDs = appendIfMissing(dest.FleetIDs, fleet.ID)
 
@@ -290,6 +296,7 @@ func (e *Engine) applyBotCommand(bc BotCommand) {
 		fleet.DepartYear = e.State.Clock
 		fleet.ArrivalYear = e.State.Clock + travelYears
 		fleet.DestID = bc.DestID
+		fleet.SourceID = src.ID
 		src.FleetIDs = removeString(src.FleetIDs, fleet.ID)
 		fleet.LocationID = ""
 	}

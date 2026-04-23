@@ -5,6 +5,8 @@ export class ClientState {
         this.stars = []         // static, from /api/stars
         this.systems = {}       // key: systemId → SystemDTO
         this.events = []        // EventDTOs, sorted by arrivalYear
+        this.pendingCommands = {} // key: commandId → PendingCommandDTO (player commands in flight)
+        this.inTransitFleets = {} // key: fleetId → FleetDTO (human fleets currently in transit)
         this.gameYear = 0.0
         this.paused = false
         this.gameOver = false
@@ -25,9 +27,15 @@ export class ClientState {
         this.gameOver = gs.gameOver
         gs.systems.forEach(s => this.systems[s.id] = s)
         this.events = gs.events.slice().sort((a, b) => a.arrivalYear - b.arrivalYear)
+        this.pendingCommands = {}
+        ;(gs.pendingCommands || []).forEach(c => this.pendingCommands[c.id] = c)
+        this.inTransitFleets = {}
+        ;(gs.humanFleetsInTransit || []).forEach(f => this.inTransitFleets[f.id] = f)
         this.localClockBase = gs.gameYear
         this.localClockBaseTime = Date.now()
         this.emit('stateLoaded', this)
+        this.emit('pendingCommandsChanged', this)
+        this.emit('inTransitFleetsChanged', this)
     }
 
     onClockSync(data) {
@@ -35,7 +43,56 @@ export class ClientState {
         this.paused = data.paused
         this.localClockBase = data.gameYear
         this.localClockBaseTime = Date.now()
+        if (this.prunePendingCommands(data.gameYear)) {
+            this.emit('pendingCommandsChanged', this)
+        }
+        if (this.pruneInTransitFleets(data.gameYear)) {
+            this.emit('inTransitFleetsChanged', this)
+        }
         this.emit('clockSync', data)
+    }
+
+    onFleetDeparted(fleet) {
+        if (!fleet || !fleet.id) return
+        this.inTransitFleets[fleet.id] = fleet
+        this.emit('inTransitFleetsChanged', this)
+    }
+
+    pruneInTransitFleets(clock) {
+        let removed = false
+        for (const id in this.inTransitFleets) {
+            if (this.inTransitFleets[id].arrivalYear <= clock) {
+                delete this.inTransitFleets[id]
+                removed = true
+            }
+        }
+        return removed
+    }
+
+    addPendingCommand(cmd) {
+        if (!cmd || !cmd.id) return
+        this.pendingCommands[cmd.id] = cmd
+        this.emit('pendingCommandsChanged', this)
+    }
+
+    removePendingCommand(id) {
+        if (this.pendingCommands[id]) {
+            delete this.pendingCommands[id]
+            this.emit('pendingCommandsChanged', this)
+        }
+    }
+
+    // prunePendingCommands removes entries whose executeYear has passed.
+    // Returns true if any were removed.
+    prunePendingCommands(clock) {
+        let removed = false
+        for (const id in this.pendingCommands) {
+            if (this.pendingCommands[id].executeYear <= clock) {
+                delete this.pendingCommands[id]
+                removed = true
+            }
+        }
+        return removed
     }
 
     onGameEvent(evt) {

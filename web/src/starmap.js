@@ -11,6 +11,10 @@ const LINE_COLOR        = 0x66aaff
 const RAYCAST_THRESHOLD = 0.5
 const AXIS_LENGTH       = 25
 const AXIS_COLOR        = 0xffff00
+const ARROW_COLOR       = 0xFFA500
+const ARROW_HEAD_LENGTH = 0.8
+const ARROW_HEAD_WIDTH  = 0.4
+const ARROW_HIT_RADIUS  = 0.3
 
 const STATUS_NAMES = {
     human:       'Human-held',
@@ -45,6 +49,11 @@ export class StarMap {
 
         this.highlightedIndex = -1
 
+        // Amber arrows for pending commands / in-transit fleets
+        this.arrows = new Map()   // key: arrow id → { arrowHelper, hitMesh, description, endYear }
+        this.arrowHitMeshes = []  // flat list for raycasting
+        this.currentHoveredArrowId = null
+
         this.renderPending = false
 
         // Selection mode state (A-5, FR-034, FR-038)
@@ -56,6 +65,10 @@ export class StarMap {
         // Re-color stars whenever known state changes
         state.on('systemUpdated', () => this.updateStarColors())
         state.on('stateLoaded',   () => this.updateStarColors())
+
+        // Rebuild arrows whenever the pending-command set changes
+        state.on('pendingCommandsChanged',  () => this._rebuildArrows())
+        state.on('inTransitFleetsChanged',  () => this._rebuildArrows())
     }
 
     // Called from main.js after UIController is constructed.
@@ -190,19 +203,40 @@ export class StarMap {
                 mouse.y = -(e.clientY / window.innerHeight) * 2 + 1
 
                 raycaster.setFromCamera(mouse, this.camera)
-                const hits = raycaster.intersectObject(this.starPoints)
 
-                if (hits.length > 0) {
-                    const idx = hits[0].index
-                    // Sol has no hover per FR-029 (right-click only)
-                    if (idx !== this.solIndex && idx !== this.currentHoveredIndex) {
+                // Arrow hit takes priority over star hover
+                let arrowHit = null
+                if (this.arrowHitMeshes.length > 0) {
+                    const aHits = raycaster.intersectObjects(this.arrowHitMeshes)
+                    if (aHits.length > 0) arrowHit = aHits[0].object.userData.arrowId
+                }
+
+                if (arrowHit !== null) {
+                    if (arrowHit !== this.currentHoveredArrowId) {
                         this._clearHoverElements()
-                        this._showHoverElements(idx)
-                        this.currentHoveredIndex = idx
+                        this.currentHoveredIndex = -1
+                        this._showArrowHover(arrowHit)
+                        this.currentHoveredArrowId = arrowHit
                     }
-                } else if (this.currentHoveredIndex !== -1) {
-                    this._clearHoverElements()
-                    this.currentHoveredIndex = -1
+                } else {
+                    if (this.currentHoveredArrowId !== null) {
+                        this._clearArrowHover()
+                        this.currentHoveredArrowId = null
+                    }
+                    const hits = raycaster.intersectObject(this.starPoints)
+
+                    if (hits.length > 0) {
+                        const idx = hits[0].index
+                        // Sol has no hover per FR-029 (right-click only)
+                        if (idx !== this.solIndex && idx !== this.currentHoveredIndex) {
+                            this._clearHoverElements()
+                            this._showHoverElements(idx)
+                            this.currentHoveredIndex = idx
+                        }
+                    } else if (this.currentHoveredIndex !== -1) {
+                        this._clearHoverElements()
+                        this.currentHoveredIndex = -1
+                    }
                 }
             }
 
@@ -483,6 +517,110 @@ export class StarMap {
         if (this.selectionBannerEl) {
             this.selectionBannerEl.style.display = 'none'
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Amber arrows (pending commands; in-transit fleets added later)
+    // -------------------------------------------------------------------------
+
+    _rebuildArrows() {
+        this._clearAllArrows()
+
+        const pc = this.state.pendingCommands || {}
+        for (const id in pc) {
+            const cmd = pc[id]
+            const from = this._starPos(cmd.originId)
+            const to   = this._starPos(cmd.targetId)
+            if (!from || !to) continue
+            this._addArrow(`cmd-${id}`, from, to, cmd.description, cmd.executeYear)
+        }
+
+        const fleets = this.state.inTransitFleets || {}
+        for (const id in fleets) {
+            const f = fleets[id]
+            const from = this._starPos(f.sourceId)
+            const to   = this._starPos(f.destinationId)
+            if (!from || !to) continue
+            this._addArrow(`fleet-${id}`, from, to, this._describeFleetInTransit(f), f.arrivalYear)
+        }
+
+        this.requestRender()
+    }
+
+    _describeFleetInTransit(f) {
+        const dest = this.stars.find(s => s.id === f.destinationId)
+        const destName = dest ? dest.displayName : f.destinationId
+        const unitParts = []
+        for (const [type, count] of Object.entries(f.units || {})) {
+            if (count > 0) {
+                const label = type.replace(/_/g, ' ') + (count === 1 ? '' : 's')
+                unitParts.push(`${count} ${label}`)
+            }
+        }
+        const composition = unitParts.length > 0 ? ` (${unitParts.join(', ')})` : ''
+        return `${f.name}${composition} in transit to ${destName} (arrives yr ${f.arrivalYear.toFixed(1)})`
+    }
+
+    _clearAllArrows() {
+        for (const entry of this.arrows.values()) {
+            this.scene.remove(entry.arrowHelper)
+            this.scene.remove(entry.hitMesh)
+            entry.hitMesh.geometry.dispose()
+            entry.hitMesh.material.dispose()
+        }
+        this.arrows.clear()
+        this.arrowHitMeshes = []
+        if (this.currentHoveredArrowId !== null) {
+            this._clearArrowHover()
+            this.currentHoveredArrowId = null
+        }
+    }
+
+    _starPos(id) {
+        const s = this.stars.find(x => x.id === id)
+        if (!s) return null
+        return new THREE.Vector3(s.x, s.y, s.z)
+    }
+
+    _addArrow(id, from, to, description, endYear) {
+        const diff = new THREE.Vector3().subVectors(to, from)
+        const length = diff.length()
+        if (length < 1e-6) return
+        const dir = diff.clone().normalize()
+
+        const arrowHelper = new THREE.ArrowHelper(
+            dir, from, length, ARROW_COLOR, ARROW_HEAD_LENGTH, ARROW_HEAD_WIDTH,
+        )
+        this.scene.add(arrowHelper)
+
+        // Invisible narrow cylinder along the arrow for hit-testing
+        const geo  = new THREE.CylinderGeometry(ARROW_HIT_RADIUS, ARROW_HIT_RADIUS, length, 8)
+        const mat  = new THREE.MeshBasicMaterial({ visible: false })
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.position.copy(from).addScaledVector(dir, length * 0.5)
+        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir)
+        mesh.userData.arrowId = id
+        this.scene.add(mesh)
+
+        this.arrows.set(id, { arrowHelper, hitMesh: mesh, description, endYear })
+        this.arrowHitMeshes.push(mesh)
+    }
+
+    _showArrowHover(id) {
+        const entry = this.arrows.get(id)
+        if (!entry) return
+        const log = document.getElementById('message-log')
+        if (!log) return
+        log.innerHTML = ''
+        const line = document.createElement('div')
+        line.className = 'msg-line'
+        line.innerHTML = `<span class="star-forces">${entry.description}</span>`
+        log.appendChild(line)
+    }
+
+    _clearArrowHover() {
+        const log = document.getElementById('message-log')
+        if (log) log.innerHTML = ''
     }
 
     // -------------------------------------------------------------------------

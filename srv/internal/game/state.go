@@ -63,6 +63,7 @@ type Fleet struct {
 	Owner      Owner
 	Units      map[WeaponType]int
 	LocationID string  // system ID if stationed; "" if in transit
+	SourceID   string  // origin system when in transit; "" otherwise
 	DestID     string  // "" if not in transit
 	DepartYear float64
 	ArrivalYear float64
@@ -214,6 +215,7 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 		fleet.DepartYear = s.Clock
 		fleet.ArrivalYear = s.Clock + travelYears
 		fleet.DestID = cmd.DestID
+		fleet.SourceID = cmd.TargetID
 		// Remove from current system's fleet list
 		sys.FleetIDs = removeString(sys.FleetIDs, fleet.ID)
 		fleet.LocationID = ""

@@ -210,8 +210,51 @@ func fleetToMap(f *Fleet) map[string]interface{} {
 		"owner":         string(f.Owner),
 		"units":         units,
 		"inTransit":     f.InTransit,
+		"sourceId":      f.SourceID,
 		"destinationId": f.DestID,
+		"departYear":    f.DepartYear,
 		"arrivalYear":   f.ArrivalYear,
+	}
+}
+
+// pendingCommandToMap converts a PendingCommand to a map for JSON encoding,
+// including a server-formed hover description.
+func pendingCommandToMap(state *GameState, cmd *PendingCommand) map[string]interface{} {
+	return map[string]interface{}{
+		"id":          cmd.ID,
+		"type":        string(cmd.Type),
+		"originId":    cmd.OriginID,
+		"targetId":    cmd.TargetID,
+		"executeYear": cmd.ExecuteYear,
+		"description": describePendingCommandLocal(state, cmd),
+	}
+}
+
+// describePendingCommandLocal formats hover text for an in-flight command.
+// Kept in the game package for the SSE path; mirrors the REST describePendingCommand.
+func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
+	targetName := cmd.TargetID
+	if sys, ok := state.Systems[cmd.TargetID]; ok {
+		targetName = sys.DisplayName
+	}
+	switch cmd.Type {
+	case CmdConstruct:
+		return fmt.Sprintf("Construct %d %s at %s (executes yr %.1f)",
+			cmd.Quantity, cmd.WeaponType, targetName, cmd.ExecuteYear)
+	case CmdMove:
+		fleetName := cmd.FleetID
+		if f, ok := state.Fleets[cmd.FleetID]; ok {
+			fleetName = f.Name
+		}
+		destName := cmd.DestID
+		if sys, ok := state.Systems[cmd.DestID]; ok {
+			destName = sys.DisplayName
+		}
+		return fmt.Sprintf("Order: Move %s to %s (arrives yr %.1f)",
+			fleetName, destName, cmd.ExecuteYear)
+	default:
+		return fmt.Sprintf("Command %s to %s (arrives yr %.1f)",
+			cmd.Type, targetName, cmd.ExecuteYear)
 	}
 }
 
@@ -260,13 +303,38 @@ func fullStateMap(state *GameState) map[string]interface{} {
 		events = append(events, eventToMap(evt))
 	}
 
-	return map[string]interface{}{
-		"gameYear":  state.Clock,
-		"paused":    state.Paused,
-		"gameOver":  state.GameOver,
-		"winner":    string(state.Winner),
-		"winReason": state.WinReason,
-		"systems":   systems,
-		"events":    events,
+	pendingCommands := make([]map[string]interface{}, 0, len(state.PendingCmds))
+	for _, cmd := range state.PendingCmds {
+		if cmd.IsBot {
+			continue
+		}
+		pendingCommands = append(pendingCommands, pendingCommandToMap(state, cmd))
 	}
+
+	inTransit := make([]map[string]interface{}, 0)
+	for _, f := range state.Fleets {
+		if f.Owner == HumanOwner && f.InTransit {
+			inTransit = append(inTransit, fleetToMap(f))
+		}
+	}
+
+	return map[string]interface{}{
+		"gameYear":             state.Clock,
+		"paused":               state.Paused,
+		"gameOver":             state.GameOver,
+		"winner":               string(state.Winner),
+		"winReason":            state.WinReason,
+		"systems":              systems,
+		"events":               events,
+		"pendingCommands":      pendingCommands,
+		"humanFleetsInTransit": inTransit,
+	}
+}
+
+// BroadcastFleetDeparted sends a fleet_departed SSE event. Called by the engine
+// immediately after a human-owned move command begins transit.
+// Caller must hold state.mu.
+func (m *EventManager) BroadcastFleetDeparted(f *Fleet) {
+	payload := sseFrame("fleet_departed", fleetToMap(f))
+	m.broadcastBytes(payload)
 }

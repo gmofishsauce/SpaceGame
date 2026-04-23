@@ -16,10 +16,11 @@ type CommandRequest struct {
 
 // CommandResponse is the JSON body returned by POST /api/command.
 type CommandResponse struct {
-	OK                   bool    `json:"ok"`
-	CommandID            string  `json:"commandId,omitempty"`
-	EstimatedArrivalYear float64 `json:"estimatedArrivalYear,omitempty"`
-	Error                string  `json:"error,omitempty"`
+	OK                   bool               `json:"ok"`
+	CommandID            string             `json:"commandId,omitempty"`
+	EstimatedArrivalYear float64            `json:"estimatedArrivalYear,omitempty"`
+	Pending              *PendingCommandDTO `json:"pending,omitempty"`
+	Error                string             `json:"error,omitempty"`
 }
 
 // PauseRequest is the JSON body for POST /api/pause.
@@ -58,7 +59,9 @@ type FleetDTO struct {
 	Owner       game.Owner     `json:"owner"`
 	Units       map[string]int `json:"units"`
 	InTransit   bool           `json:"inTransit"`
+	SourceID    string         `json:"sourceId,omitempty"`
 	DestID      string         `json:"destinationId,omitempty"`
+	DepartYear  float64        `json:"departYear,omitempty"`
 	ArrivalYear float64        `json:"arrivalYear,omitempty"`
 }
 
@@ -71,15 +74,27 @@ type EventDTO struct {
 	Description string  `json:"description"`
 }
 
+// PendingCommandDTO is a player command currently in flight from Sol to its target.
+type PendingCommandDTO struct {
+	ID          string  `json:"id"`
+	Type        string  `json:"type"`
+	OriginID    string  `json:"originId"`
+	TargetID    string  `json:"targetId"`
+	ExecuteYear float64 `json:"executeYear"`
+	Description string  `json:"description"`
+}
+
 // StateResponse is the full snapshot returned by GET /api/state.
 type StateResponse struct {
-	GameYear  float64     `json:"gameYear"`
-	Paused    bool        `json:"paused"`
-	GameOver  bool        `json:"gameOver"`
-	Winner    string      `json:"winner,omitempty"`
-	WinReason string      `json:"winReason,omitempty"`
-	Systems   []SystemDTO `json:"systems"`
-	Events    []EventDTO  `json:"events"`
+	GameYear             float64             `json:"gameYear"`
+	Paused               bool                `json:"paused"`
+	GameOver             bool                `json:"gameOver"`
+	Winner               string              `json:"winner,omitempty"`
+	WinReason            string              `json:"winReason,omitempty"`
+	Systems              []SystemDTO         `json:"systems"`
+	Events               []EventDTO          `json:"events"`
+	PendingCommands      []PendingCommandDTO `json:"pendingCommands"`
+	HumanFleetsInTransit []FleetDTO          `json:"humanFleetsInTransit"`
 }
 
 // DebugEventDTO is a full authoritative event entry for the debug log.

@@ -63,6 +63,10 @@ export class APIClient {
             this.state.onSystemUpdate(JSON.parse(e.data))
         })
 
+        this.es.addEventListener('fleet_departed', e => {
+            this.state.onFleetDeparted(JSON.parse(e.data))
+        })
+
         this.es.addEventListener('game_over', e => {
             this.state.onGameOver(JSON.parse(e.data))
         })

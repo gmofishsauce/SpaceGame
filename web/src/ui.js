@@ -367,7 +367,8 @@ export class UIController {
             weaponType,
             quantity: 1,
         })
-        if (!resp.ok) this.showCommandError(resp.error)
+        if (!resp.ok) { this.showCommandError(resp.error); return }
+        if (resp.pending) this.state.addPendingCommand(resp.pending)
     }
 
     // -------------------------------------------------------------------------
@@ -462,7 +463,8 @@ export class UIController {
             fleetId,
             destinationId,
         })
-        if (!resp.ok) this.showCommandError(resp.error)
+        if (!resp.ok) { this.showCommandError(resp.error); return }
+        if (resp.pending) this.state.addPendingCommand(resp.pending)
     }
 
     // -------------------------------------------------------------------------

@@ -69,14 +69,23 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	inTransit := make([]FleetDTO, 0)
+	for _, f := range s.state.Fleets {
+		if f.Owner == game.HumanOwner && f.InTransit {
+			inTransit = append(inTransit, fleetToDTO(f))
+		}
+	}
+
 	resp := StateResponse{
-		GameYear:  s.state.Clock,
-		Paused:    s.state.Paused,
-		GameOver:  s.state.GameOver,
-		Winner:    string(s.state.Winner),
-		WinReason: s.state.WinReason,
-		Systems:   systems,
-		Events:    events,
+		GameYear:             s.state.Clock,
+		Paused:               s.state.Paused,
+		GameOver:             s.state.GameOver,
+		Winner:               string(s.state.Winner),
+		WinReason:            s.state.WinReason,
+		Systems:              systems,
+		Events:               events,
+		PendingCommands:      buildPendingCommandDTOs(s.state),
+		HumanFleetsInTransit: inTransit,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -159,11 +168,23 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.state.RLock()
+	dto := PendingCommandDTO{
+		ID:          cmd.ID,
+		Type:        string(cmd.Type),
+		OriginID:    cmd.OriginID,
+		TargetID:    cmd.TargetID,
+		ExecuteYear: cmd.ExecuteYear,
+		Description: describePendingCommand(s.state, cmd),
+	}
+	s.state.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(CommandResponse{
 		OK:                   true,
 		CommandID:            cmdID,
 		EstimatedArrivalYear: arrivalYear,
+		Pending:              &dto,
 	})
 }
 
@@ -267,6 +288,54 @@ func buildSystemDTO(state *game.GameState, sys *game.StarSystem) SystemDTO {
 	}
 }
 
+// buildPendingCommandDTOs returns player-visible pending-command DTOs,
+// excluding bot commands. Descriptions are formed server-side using
+// readily available system/fleet display names.
+func buildPendingCommandDTOs(state *game.GameState) []PendingCommandDTO {
+	out := make([]PendingCommandDTO, 0, len(state.PendingCmds))
+	for _, cmd := range state.PendingCmds {
+		if cmd.IsBot {
+			continue
+		}
+		out = append(out, PendingCommandDTO{
+			ID:          cmd.ID,
+			Type:        string(cmd.Type),
+			OriginID:    cmd.OriginID,
+			TargetID:    cmd.TargetID,
+			ExecuteYear: cmd.ExecuteYear,
+			Description: describePendingCommand(state, cmd),
+		})
+	}
+	return out
+}
+
+// describePendingCommand formats the hover-text description for an in-flight command.
+func describePendingCommand(state *game.GameState, cmd *game.PendingCommand) string {
+	targetName := cmd.TargetID
+	if sys, ok := state.Systems[cmd.TargetID]; ok {
+		targetName = sys.DisplayName
+	}
+	switch cmd.Type {
+	case game.CmdConstruct:
+		return fmt.Sprintf("Construct %d %s at %s (executes yr %.1f)",
+			cmd.Quantity, cmd.WeaponType, targetName, cmd.ExecuteYear)
+	case game.CmdMove:
+		fleetName := cmd.FleetID
+		if f, ok := state.Fleets[cmd.FleetID]; ok {
+			fleetName = f.Name
+		}
+		destName := cmd.DestID
+		if sys, ok := state.Systems[cmd.DestID]; ok {
+			destName = sys.DisplayName
+		}
+		return fmt.Sprintf("Order: Move %s to %s (arrives yr %.1f)",
+			fleetName, destName, cmd.ExecuteYear)
+	default:
+		return fmt.Sprintf("Command %s to %s (arrives yr %.1f)",
+			cmd.Type, targetName, cmd.ExecuteYear)
+	}
+}
+
 func fleetToDTO(f *game.Fleet) FleetDTO {
 	units := map[string]int{}
 	for wt, n := range f.Units {
@@ -280,7 +349,9 @@ func fleetToDTO(f *game.Fleet) FleetDTO {
 		Owner:       f.Owner,
 		Units:       units,
 		InTransit:   f.InTransit,
+		SourceID:    f.SourceID,
 		DestID:      f.DestID,
+		DepartYear:  f.DepartYear,
 		ArrivalYear: f.ArrivalYear,
 	}
 }
