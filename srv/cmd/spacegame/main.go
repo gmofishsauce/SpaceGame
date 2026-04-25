@@ -20,8 +20,15 @@ import (
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("received signal %s, exiting", sig)
+		os.Exit(0)
+	}()
+
+	ctx := context.Background()
 
 	// Resolve CSV paths relative to the working directory (project root).
 	nearestCSV := envOrDefault("SPACEGAME_NEAREST_CSV", "nearest.csv")

@@ -10,7 +10,7 @@ import (
 // deltaYears at that system's econ rate. (FR-046)
 func AccumulateWealth(state *GameState, deltaYears float64) {
 	for _, sys := range state.Systems {
-		if sys.Status == StatusHuman && sys.EconLevel >= 0 && sys.EconLevel <= 4 {
+		if sys.Status == StatusHuman && sys.EconLevel >= 0 && sys.EconLevel <= 5 {
 			sys.Wealth += EconWealthRate[sys.EconLevel] * deltaYears
 		}
 	}
@@ -23,7 +23,7 @@ func AdvanceEconLevels(state *GameState) {
 		if sys.Status != StatusHuman {
 			continue
 		}
-		if sys.EconLevel < 4 && state.Clock >= sys.EconGrowthYear {
+		if sys.EconLevel < 5 && state.Clock >= sys.EconGrowthYear {
 			sys.EconLevel++
 			sys.EconGrowthYear = state.Clock + EconGrowthIntervalYears
 
@@ -220,8 +220,8 @@ func ProjectedWealth(state *GameState, sys *StarSystem, futureYear float64) floa
 	if level < 0 {
 		level = 0
 	}
-	if level > 4 {
-		level = 4
+	if level > 5 {
+		level = 5
 	}
 	return sys.Wealth + EconWealthRate[level]*deltaYears
 }

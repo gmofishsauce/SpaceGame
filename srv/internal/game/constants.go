@@ -11,7 +11,7 @@ const (
 
 	// Fleet and command speed (FR-031, FR-041)
 	FleetSpeedC   = 0.8 // fraction of c; LY per in-game year
-	CommandSpeedC = 0.8 // same as fleet speed
+	CommandSpeedC = 1.0 // commands travel at c (Sol has a comm laser)
 
 	// Economic level growth: rises 1 level per N in-game years without combat (FR-048)
 	EconGrowthIntervalYears = 100.0
@@ -56,8 +56,8 @@ const (
 )
 
 // EconWealthRate[level] = wealth units accumulated per in-game year = 2^level. (FR-046)
-// Indices 0–4.
-var EconWealthRate = [5]float64{1.0, 2.0, 4.0, 8.0, 16.0}
+// Indices 0–5.
+var EconWealthRate = [6]float64{1.0, 2.0, 4.0, 8.0, 16.0, 32.0}
 
 // WeaponDefs defines all weapon/device type parameters. (FR-040, FR-050)
 // AttackPower and Vulnerability use: 0=none, 1=low, 3=medium, 10=high.

@@ -427,7 +427,7 @@ export class UIController {
             const travelYears = star.distFromSol / CommandSpeedC
             const note = document.createElement('p')
             note.className = 'dialog-note'
-            note.textContent = `Commands travel at 0.8c — arrive in ${travelYears.toFixed(1)} years.`
+            note.textContent = `Commands travel at c — arrive in ${travelYears.toFixed(1)} years.`
             modal.content.appendChild(note)
         }
 

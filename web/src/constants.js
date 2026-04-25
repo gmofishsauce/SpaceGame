@@ -1,5 +1,5 @@
 export const TimeScaleYearsPerSecond = 10.0 / 180.0
-export const CommandSpeedC = 0.8
+export const CommandSpeedC = 1.0 // commands travel at c (Sol has a comm laser)
 export const FleetSpeedC = 0.8
 
 export const STATUS_COLORS = {
