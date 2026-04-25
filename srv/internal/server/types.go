@@ -23,6 +23,7 @@ type CommandResponse struct {
 	CommandID            string             `json:"commandId,omitempty"`
 	EstimatedArrivalYear float64            `json:"estimatedArrivalYear,omitempty"`
 	Pending              *PendingCommandDTO `json:"pending,omitempty"`
+	FleetName            string             `json:"fleetName,omitempty"`
 	Error                string             `json:"error,omitempty"`
 }
 

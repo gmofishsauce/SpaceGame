@@ -180,6 +180,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		ExecuteYear: cmd.ExecuteYear,
 		Description: describePendingCommand(s.state, cmd),
 	}
+	var fleetName string
+	if cmd.Type == game.CmdCreateFleet {
+		if sys, ok := s.state.Systems[cmd.TargetID]; ok {
+			fleetName = game.NextFleetName(sys)
+		}
+	}
 	s.state.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -188,6 +194,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		CommandID:            cmdID,
 		EstimatedArrivalYear: arrivalYear,
 		Pending:              &dto,
+		FleetName:            fleetName,
 	})
 }
 

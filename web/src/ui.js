@@ -82,38 +82,36 @@ export class UIController {
         menu.appendChild(title)
 
         if (star.isSol) {
-            // Sol: "Construct…" unconditionally (FR-030, FR-034); fleet command if fleets present
-            menu.appendChild(this._menuItem('Construct\u2026', () => {
+            // Sol: "Construct…" unconditionally (FR-030, FR-034); fleet items always shown
+            menu.appendChild(this._menuItem('Construct…', () => {
                 this._closeContextMenu()
                 this.starMap.enterSelectionMode('construct')
             }))
 
             const stationedFleets = (sys?.knownFleets ?? []).filter(f => !f.inTransit)
             if (stationedFleets.length > 0) {
-                menu.appendChild(this._menuItem('Command Fleet\u2026', () => {
+                menu.appendChild(this._menuItem('Command Fleet…', () => {
                     this._closeContextMenu()
                     this.showFleetCommandDialog(star, stationedFleets)
                 }))
-                menu.appendChild(this._menuItem('Fleets\u2026', () => {
-                    this._closeContextMenu()
-                    this.showManageFleetsDialog(star, stationedFleets)
-                }))
             }
+            menu.appendChild(this._menuItem('Manage Fleets…', () => {
+                this._closeContextMenu()
+                this.showManageFleetsDialog(star, stationedFleets)
+            }))
         } else if (status === 'human') {
-            // Non-Sol human system: fleet command only, never construction (FR-034)
+            // Non-Sol human system: fleet items always shown, never construction (FR-034)
             const stationedFleets = (sys?.knownFleets ?? []).filter(f => !f.inTransit)
             if (stationedFleets.length > 0) {
-                menu.appendChild(this._menuItem('Command Fleet\u2026', () => {
+                menu.appendChild(this._menuItem('Command Fleet…', () => {
                     this._closeContextMenu()
                     this.showFleetCommandDialog(star, stationedFleets)
                 }))
-                menu.appendChild(this._menuItem('Fleets\u2026', () => {
-                    this._closeContextMenu()
-                    this.showManageFleetsDialog(star, stationedFleets)
-                }))
-            } else {
-                menu.appendChild(this._disabledItem('No actions available'))
             }
+            menu.appendChild(this._menuItem('Manage Fleets…', () => {
+                this._closeContextMenu()
+                this.showManageFleetsDialog(star, stationedFleets)
+            }))
         } else {
             // Alien-held, unknown, or uninhabited (FR-029)
             menu.appendChild(this._disabledItem('No actions available'))
@@ -433,43 +431,74 @@ export class UIController {
             modal.content.appendChild(note)
         }
 
-        // Fleet roster table
+        // Stable section-title for the roster (outside wrappers)
         const rosterTitle = document.createElement('h3')
         rosterTitle.className = 'manage-section-title'
         rosterTitle.textContent = 'Stationed Fleets'
         modal.content.appendChild(rosterTitle)
 
-        const table = document.createElement('table')
-        table.className = 'fleet-roster-table'
-        table.innerHTML = '<thead><tr><th>Fleet</th><th>Units</th></tr></thead>'
-        const tbody = document.createElement('tbody')
-        for (const fleet of stationedFleets) {
-            const row = document.createElement('tr')
-            const nameTd = document.createElement('td')
-            nameTd.textContent = fleet.name
-            const unitsTd = document.createElement('td')
-            unitsTd.textContent = this._formatUnits(fleet.units) || '(empty)'
-            row.appendChild(nameTd)
-            row.appendChild(unitsTd)
-            tbody.appendChild(row)
-        }
-        table.appendChild(tbody)
-        modal.content.appendChild(table)
+        // Wrapper divs that rebuild() will clear and refill
+        const rosterWrapper   = document.createElement('div')
+        const reassignWrapper = document.createElement('div')
+        modal.content.appendChild(rosterWrapper)
+        modal.content.appendChild(reassignWrapper)
 
-        // Reassign section (only meaningful with 2+ fleets)
-        if (stationedFleets.length >= 2) {
-            modal.content.appendChild(this._makeReassignSection(star, stationedFleets, modal))
+        // rebuild() re-renders both sections from a fresh fleet list
+        const rebuild = (fleets) => {
+            // Roster table
+            rosterWrapper.innerHTML = ''
+            const table = document.createElement('table')
+            table.className = 'fleet-roster-table'
+            table.innerHTML = '<thead><tr><th>Fleet</th><th>Units</th></tr></thead>'
+            const tbody = document.createElement('tbody')
+            for (const fleet of fleets) {
+                const row = document.createElement('tr')
+                const nameTd = document.createElement('td')
+                nameTd.textContent = fleet.name
+                const unitsTd = document.createElement('td')
+                unitsTd.textContent = this._formatUnits(fleet.units) || '(empty)'
+                row.appendChild(nameTd)
+                row.appendChild(unitsTd)
+                tbody.appendChild(row)
+            }
+            table.appendChild(tbody)
+            rosterWrapper.appendChild(table)
+
+            // Reassign section
+            reassignWrapper.innerHTML = ''
+            reassignWrapper.appendChild(this._makeReassignSection(star, fleets, modal))
         }
 
-        // Create Fleet button
-        const createBtn = document.createElement('button')
-        createBtn.textContent = 'Create Fleet'
-        createBtn.addEventListener('click', () => {
-            modal.overlay.remove()
-            this._sendCreateFleet(star.id)
+        rebuild(stationedFleets)
+
+        // New Fleet button
+        const newFleetBtn = document.createElement('button')
+        newFleetBtn.textContent = 'New Fleet'
+        newFleetBtn.addEventListener('click', async () => {
+            newFleetBtn.disabled = true
+            const name = await this._sendCreateFleet(star.id)
+            newFleetBtn.disabled = false
+            msgArea.textContent = name ? `fleet ${name} created` : 'fleet creation command sent'
+
+            // Listen for the SSE system_update that will arrive once the
+            // server tick executes the command, then rebuild with fresh data.
+            const onUpdate = (systemId) => {
+                if (systemId !== star.id) return
+                this.state.off('systemUpdated', onUpdate)
+                const fresh = (this.state.systems[star.id]?.knownFleets ?? [])
+                    .filter(f => !f.inTransit)
+                rebuild(fresh)
+            }
+            this.state.on('systemUpdated', onUpdate)
         })
-        modal.content.appendChild(createBtn)
+        modal.content.appendChild(newFleetBtn)
         modal.content.appendChild(this._cancelButton(() => modal.overlay.remove()))
+
+        // Message area
+        const msgArea = document.createElement('p')
+        msgArea.className = 'dialog-message'
+        modal.content.appendChild(msgArea)
+
         document.body.appendChild(modal.overlay)
     }
 
@@ -482,6 +511,15 @@ export class UIController {
         sectionTitle.textContent = 'Reassign Units'
         section.appendChild(sectionTitle)
 
+        const canReassign = fleets.length >= 2
+
+        if (!canReassign) {
+            const note = document.createElement('p')
+            note.className = 'dialog-note'
+            note.textContent = 'Create at least 2 fleets to reassign units between them.'
+            section.appendChild(note)
+        }
+
         const selRow = document.createElement('div')
         selRow.className = 'reassign-sel-row'
 
@@ -489,6 +527,7 @@ export class UIController {
         srcLabel.textContent = 'From: '
         const srcSel = document.createElement('select')
         srcSel.className = 'reassign-select'
+        srcSel.disabled = !canReassign
         for (const f of fleets) {
             const opt = document.createElement('option')
             opt.value = f.id
@@ -502,6 +541,7 @@ export class UIController {
         dstLabel.textContent = '  To: '
         const dstSel = document.createElement('select')
         dstSel.className = 'reassign-select'
+        dstSel.disabled = !canReassign
         for (const f of fleets) {
             const opt = document.createElement('option')
             opt.value = f.id
@@ -558,6 +598,7 @@ export class UIController {
 
         const sendBtn = document.createElement('button')
         sendBtn.textContent = 'Send Reassign Command'
+        sendBtn.disabled = !canReassign
         sendBtn.addEventListener('click', () => {
             if (srcSel.value === dstSel.value) {
                 this.showCommandError('Source and target fleet must be different.')
@@ -584,8 +625,9 @@ export class UIController {
             type: 'create_fleet',
             systemId,
         })
-        if (!resp.ok) { this.showCommandError(resp.error); return }
+        if (!resp.ok) { this.showCommandError(resp.error); return null }
         if (resp.pending) this.state.addPendingCommand(resp.pending)
+        return resp.fleetName ?? null
     }
 
     async _sendReassign(systemId, sourceFleetId, targetFleetId, units) {

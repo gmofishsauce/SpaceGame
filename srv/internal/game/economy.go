@@ -142,6 +142,11 @@ func ordinal(n int) string {
 	}
 }
 
+// NextFleetName returns the name that would be given to the next fleet created at sys.
+func NextFleetName(sys *StarSystem) string {
+	return fmt.Sprintf("%s-%s Fleet", sys.DisplayName, ordinal(sys.FleetCount+1))
+}
+
 // ExecuteCreateFleet creates a new empty named fleet at sys.
 func ExecuteCreateFleet(state *GameState, sys *StarSystem) error {
 	if sys.Status != StatusHuman {

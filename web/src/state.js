@@ -16,7 +16,8 @@ export class ClientState {
         this.localClockBaseTime = Date.now()
     }
 
-    on(event, fn) { this.listeners.push({ event, fn }) }
+    on(event, fn)  { this.listeners.push({ event, fn }) }
+    off(event, fn) { this.listeners = this.listeners.filter(l => !(l.event === event && l.fn === fn)) }
     emit(event, data) { this.listeners.filter(l => l.event === event).forEach(l => l.fn(data)) }
 
     initStars(stars) { this.stars = stars }
