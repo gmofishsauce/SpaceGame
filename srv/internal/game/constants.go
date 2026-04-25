@@ -69,7 +69,7 @@ var WeaponDefs = map[WeaponType]WeaponDef{
 	WeaponReporter:       {Cost: 4, MinLevel: 1, AttackPower: 0, Vulnerability: 3, CanMove: true, Reports: true, CommLaser: false},
 	WeaponEscort:         {Cost: 8, MinLevel: 2, AttackPower: 3, Vulnerability: 3, CanMove: true, Reports: false, CommLaser: false},
 	WeaponBattleship:     {Cost: 32, MinLevel: 3, AttackPower: 10, Vulnerability: 1, CanMove: true, Reports: false, CommLaser: false},
-	WeaponCommLaser:      {Cost: 64, MinLevel: 4, AttackPower: 0, Vulnerability: 10, CanMove: false, Reports: false, CommLaser: true},
+	WeaponCommLaser:      {Cost: 64, MinLevel: 4, AttackPower: 0, Vulnerability: 10, CanMove: true, Reports: false, CommLaser: true},
 }
 
 // AlienInitialComposition is the unit mix placed at each alien entry point at game start. (G-1)

@@ -71,6 +71,36 @@ func addFleet(st *GameState, sys *StarSystem, owner Owner, units map[WeaponType]
 	return f
 }
 
+// addInTransitFleet creates a fleet in transit to destID, arriving at arrivalYear.
+func addInTransitFleet(st *GameState, owner Owner, units map[WeaponType]int, destID string, arrivalYear float64) *Fleet {
+	fid := st.NewFleetID()
+	fname := st.NewFleetName()
+	f := &Fleet{
+		ID:          fid,
+		Name:        fname,
+		Owner:       owner,
+		Units:       units,
+		InTransit:   true,
+		DestID:      destID,
+		ArrivalYear: arrivalYear,
+	}
+	st.Fleets[fid] = f
+	return f
+}
+
+// newUninhabitedSystem returns a minimal uninhabited StarSystem not yet added to any state.
+func newUninhabitedSystem(id string, distFromSol float64) *StarSystem {
+	return &StarSystem{
+		ID:              id,
+		DisplayName:     id,
+		DistFromSol:     distFromSol,
+		Status:          StatusUninhabited,
+		LocalUnits:      map[WeaponType]int{},
+		KnownLocalUnits: map[WeaponType]int{},
+		KnownFleetIDs:   []string{},
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestCheckVictory
 // ---------------------------------------------------------------------------
@@ -221,18 +251,6 @@ func TestValidateConstruct_InsufficientWealth(t *testing.T) {
 	}
 }
 
-func TestValidateConstruct_EconLevelTooLow(t *testing.T) {
-	sys := &StarSystem{
-		ID:         "remote",
-		Status:     StatusHuman,
-		EconLevel:  1, // Battleship requires level 3
-		Wealth:     1000,
-		LocalUnits: map[WeaponType]int{},
-	}
-	if err := ValidateConstruct(sys, WeaponBattleship, 1); err == nil {
-		t.Fatal("expected error for econ level too low, got nil")
-	}
-}
 
 func TestValidateConstruct_AlienHeldSystem(t *testing.T) {
 	sys := &StarSystem{
@@ -810,5 +828,228 @@ func TestArrivalYearFor_SolIsImmediate(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestConquest
+// ---------------------------------------------------------------------------
+
+func newConquestEngine(st *GameState) *Engine {
+	return &Engine{State: st, rng: rand.New(rand.NewSource(42))}
+}
+
+func TestConquest_HumanFleetWithCommLaser_ClaimsUninhabited(t *testing.T) {
+	st := newMinimalState()
+	st.Clock = 10.0
+	uninhabited := newUninhabitedSystem("proxima", 4.24)
+	st.Systems["proxima"] = uninhabited
+
+	addInTransitFleet(st, HumanOwner, map[WeaponType]int{
+		WeaponCommLaser:  1,
+		WeaponBattleship: 1,
+	}, "proxima", 10.0) // arrives exactly at clock
+
+	newConquestEngine(st).processFleetArrivals()
+
+	if uninhabited.Status != StatusHuman {
+		t.Errorf("expected Status=human after conquest, got %q", uninhabited.Status)
+	}
+	if uninhabited.EconLevel != 0 {
+		t.Errorf("expected EconLevel=0, got %d", uninhabited.EconLevel)
+	}
+	if uninhabited.Wealth != 0 {
+		t.Errorf("expected Wealth=0, got %.2f", uninhabited.Wealth)
+	}
+	wantGrowthYear := st.Clock + EconGrowthIntervalYears
+	if uninhabited.EconGrowthYear != wantGrowthYear {
+		t.Errorf("expected EconGrowthYear=%.1f, got %.1f", wantGrowthYear, uninhabited.EconGrowthYear)
+	}
+
+	var conquestEvt *GameEvent
+	for _, e := range st.Events {
+		if e.Type == EventSystemConquered && e.SystemID == "proxima" {
+			conquestEvt = e
+			break
+		}
+	}
+	if conquestEvt == nil {
+		t.Fatal("expected system_conquered event, found none")
+	}
+	if !conquestEvt.CanReport {
+		t.Error("expected conquest event CanReport=true")
+	}
+	wantArrYear := st.Clock + uninhabited.DistFromSol // at c, since comm laser present
+	if math.Abs(conquestEvt.ArrivalYear-wantArrYear) > 1e-9 {
+		t.Errorf("conquest event ArrivalYear=%.6f, want %.6f", conquestEvt.ArrivalYear, wantArrYear)
+	}
+}
+
+func TestConquest_NoCommLaser_NoConquest(t *testing.T) {
+	st := newMinimalState()
+	st.Clock = 10.0
+	uninhabited := newUninhabitedSystem("proxima", 4.24)
+	st.Systems["proxima"] = uninhabited
+
+	addInTransitFleet(st, HumanOwner, map[WeaponType]int{
+		WeaponBattleship: 2,
+	}, "proxima", 10.0)
+
+	newConquestEngine(st).processFleetArrivals()
+
+	if uninhabited.Status != StatusUninhabited {
+		t.Errorf("expected Status=uninhabited (no comm laser), got %q", uninhabited.Status)
+	}
+	for _, e := range st.Events {
+		if e.Type == EventSystemConquered {
+			t.Error("expected no system_conquered event when fleet has no comm laser")
+		}
+	}
+}
+
+func TestConquest_AlienFleet_NoConquest(t *testing.T) {
+	st := newMinimalState()
+	st.Clock = 10.0
+	uninhabited := newUninhabitedSystem("proxima", 4.24)
+	st.Systems["proxima"] = uninhabited
+
+	addInTransitFleet(st, AlienOwner, map[WeaponType]int{
+		WeaponCommLaser: 1,
+	}, "proxima", 10.0)
+
+	newConquestEngine(st).processFleetArrivals()
+
+	if uninhabited.Status != StatusUninhabited {
+		t.Errorf("expected Status=uninhabited (alien fleet), got %q", uninhabited.Status)
+	}
+}
+
+func TestConquest_AlreadyHumanSystem_NoConquest(t *testing.T) {
+	st := newMinimalState()
+	st.Clock = 10.0
+	// alpha-centauri is StatusHuman in newMinimalState
+	sys := st.Systems["alpha-centauri"]
+
+	addInTransitFleet(st, HumanOwner, map[WeaponType]int{
+		WeaponCommLaser: 1,
+	}, "alpha-centauri", 10.0)
+
+	newConquestEngine(st).processFleetArrivals()
+
+	// Status must remain human, and no conquest event should appear.
+	if sys.Status != StatusHuman {
+		t.Errorf("expected Status=human (unchanged), got %q", sys.Status)
+	}
+	for _, e := range st.Events {
+		if e.Type == EventSystemConquered {
+			t.Error("expected no system_conquered event for already-human system")
+		}
+	}
+}
+
+func TestConquest_KnownStateUpdatedAfterConquest(t *testing.T) {
+	// Verify UpdateKnownStates applies EventSystemConquered correctly.
+	st := newMinimalState()
+	st.Clock = 10.0
+	uninhabited := newUninhabitedSystem("proxima", 4.24)
+	uninhabited.KnownStatus = StatusUninhabited
+	st.Systems["proxima"] = uninhabited
+
+	addInTransitFleet(st, HumanOwner, map[WeaponType]int{
+		WeaponCommLaser: 1,
+	}, "proxima", 10.0)
+
+	newConquestEngine(st).processFleetArrivals()
+
+	// The conquest event arrives at clock + dist = 14.24; advance clock past that.
+	st.Clock = 20.0
+	st.UpdateKnownStates(st.Clock)
+
+	if uninhabited.KnownStatus != StatusHuman {
+		t.Errorf("expected KnownStatus=human after conquest event applied, got %q", uninhabited.KnownStatus)
+	}
+	if uninhabited.KnownEconLevel != 0 {
+		t.Errorf("expected KnownEconLevel=0, got %d", uninhabited.KnownEconLevel)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestAlienCompositionSumMatchesConstants
 //
+
+// ---------------------------------------------------------------------------
+// TestSystemHasCommLaser
+// ---------------------------------------------------------------------------
+
+func TestSystemHasCommLaser_LocalUnit(t *testing.T) {
+	st := newMinimalState()
+	sys := st.Systems["alpha-centauri"]
+	sys.LocalUnits[WeaponCommLaser] = 1
+
+	if !systemHasCommLaser(st, sys) {
+		t.Error("expected true when comm laser in LocalUnits, got false")
+	}
+}
+
+func TestSystemHasCommLaser_StationedFleet(t *testing.T) {
+	st := newMinimalState()
+	sys := st.Systems["alpha-centauri"]
+	addFleet(st, sys, HumanOwner, map[WeaponType]int{WeaponCommLaser: 1})
+
+	if !systemHasCommLaser(st, sys) {
+		t.Error("expected true when stationed human fleet carries comm laser, got false")
+	}
+}
+
+func TestSystemHasCommLaser_InTransitNotCounted(t *testing.T) {
+	st := newMinimalState()
+	sys := st.Systems["alpha-centauri"]
+	f := addFleet(st, sys, HumanOwner, map[WeaponType]int{WeaponCommLaser: 1})
+	f.InTransit = true
+	f.LocationID = ""
+
+	if systemHasCommLaser(st, sys) {
+		t.Error("expected false when comm laser fleet is in transit, got true")
+	}
+}
+
+func TestSystemHasCommLaser_AlienFleetNotCounted(t *testing.T) {
+	st := newMinimalState()
+	sys := st.Systems["alpha-centauri"]
+	addFleet(st, sys, AlienOwner, map[WeaponType]int{WeaponCommLaser: 1})
+
+	if systemHasCommLaser(st, sys) {
+		t.Error("expected false when comm laser is in alien fleet, got true")
+	}
+}
+
+func TestSystemHasCommLaser_NonePresent(t *testing.T) {
+	st := newMinimalState()
+	sys := st.Systems["alpha-centauri"]
+	addFleet(st, sys, HumanOwner, map[WeaponType]int{WeaponBattleship: 2})
+
+	if systemHasCommLaser(st, sys) {
+		t.Error("expected false when no comm laser present, got true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestExecuteConstruct_CommLaserGoesIntoFleet
+// ---------------------------------------------------------------------------
+
+func TestExecuteConstruct_CommLaserGoesIntoFleet(t *testing.T) {
+	st := newMinimalState()
+	sys := st.Systems["sol"] // level 5, wealth 1000 — meets MinLevel 4 and cost 64
+
+	ExecuteConstruct(st, sys, WeaponCommLaser, 1)
+
+	// Must NOT appear in LocalUnits (comm laser is now mobile).
+	if sys.LocalUnits[WeaponCommLaser] != 0 {
+		t.Errorf("expected LocalUnits[comm_laser]=0, got %d", sys.LocalUnits[WeaponCommLaser])
+	}
+
+	// Must appear in the primary fleet at Sol.
+	fleet := st.Fleets[sys.PrimaryFleetID]
+	if fleet == nil {
+		t.Fatal("expected a primary fleet to be created at Sol, got nil")
+	}
+	if fleet.Units[WeaponCommLaser] != 1 {
+		t.Errorf("expected fleet Units[comm_laser]=1, got %d", fleet.Units[WeaponCommLaser])
+	}
+}

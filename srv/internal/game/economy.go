@@ -27,7 +27,7 @@ func AdvanceEconLevels(state *GameState) {
 			sys.EconLevel++
 			sys.EconGrowthYear = state.Clock + EconGrowthIntervalYears
 
-			hasCommLaser := sys.LocalUnits[WeaponCommLaser] > 0
+			hasCommLaser := systemHasCommLaser(state, sys)
 			if hasCommLaser {
 				arrYear := arrivalYearFor(state.Clock, sys.DistFromSol, true)
 				state.RecordEvent(&GameEvent{
@@ -68,9 +68,6 @@ func ValidateConstruct(sys *StarSystem, wt WeaponType, qty int) error {
 	if sys.Status != StatusHuman {
 		return fmt.Errorf("system %q is not human-held", sys.ID)
 	}
-	if sys.EconLevel < def.MinLevel {
-		return fmt.Errorf("economic level %d required, system has %d", def.MinLevel, sys.EconLevel)
-	}
 	totalCost := def.Cost * float64(qty)
 	if sys.Wealth < totalCost {
 		return fmt.Errorf("insufficient wealth: need %.1f, have %.1f", totalCost, sys.Wealth)
@@ -109,7 +106,7 @@ func ExecuteConstruct(state *GameState, sys *StarSystem, wt WeaponType, qty int)
 	}
 
 	// Log construction complete event; reportable only if system has a comm laser
-	hasCommLaser := sys.LocalUnits[WeaponCommLaser] > 0
+	hasCommLaser := systemHasCommLaser(state, sys)
 	arrYear := math.MaxFloat64
 	if hasCommLaser {
 		arrYear = state.Clock + sys.DistFromSol

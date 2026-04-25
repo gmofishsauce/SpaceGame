@@ -182,7 +182,7 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 	}
 
 	// Log command arrival (FR-015)
-	hasCommLaser := sys.LocalUnits[WeaponCommLaser] > 0
+	hasCommLaser := systemHasCommLaser(s, sys)
 	arrivalArrYear := arrivalYearFor(s.Clock, sys.DistFromSol, hasCommLaser)
 	s.RecordEvent(&GameEvent{
 		EventYear:   s.Clock,
@@ -306,6 +306,11 @@ func applyEventToKnownState(sys *StarSystem, evt *GameEvent) {
 
 	case EventSystemRetaken:
 		sys.KnownStatus = StatusHuman
+
+	case EventSystemConquered:
+		sys.KnownStatus = StatusHuman
+		sys.KnownEconLevel = 0
+		sys.KnownWealth = 0
 
 	case EventConstructionDone:
 		if d, ok := evt.Details.(*ConstructionDetails); ok {

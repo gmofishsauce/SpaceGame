@@ -57,6 +57,7 @@ const (
 	EventCombatSilent    EventType = "combat_silent"    // no reporter: internal only, never broadcast
 	EventSystemCaptured  EventType = "system_captured"
 	EventSystemRetaken   EventType = "system_retaken"
+	EventSystemConquered EventType = "system_conquered"
 	EventConstructionDone EventType = "construction_done"
 	EventCommandArrived  EventType = "command_arrived"  // command reached target system (FR-015)
 	EventCommandExecuted EventType = "command_executed" // command successfully executed

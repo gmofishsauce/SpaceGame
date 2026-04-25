@@ -24,7 +24,7 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 	}
 
 	// Step 1: Comm Laser reports alien arrival at c BEFORE any combat. (FR-053)
-	hasCommLaser := sys.LocalUnits[WeaponCommLaser] > 0
+	hasCommLaser := systemHasCommLaser(state, sys)
 	if hasCommLaser {
 		state.RecordEvent(&GameEvent{
 			EventYear:   state.Clock,

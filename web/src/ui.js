@@ -218,7 +218,6 @@ export class UIController {
             const wealth     = this.state.getProjectedWealth(star.id, deltaYears)
 
             const buildable = Object.entries(WEAPON_DEFS)
-                .filter(([, def]) => def.minLevel <= econLevel)
 
             const row = document.createElement('tr')
 
@@ -306,7 +305,6 @@ export class UIController {
 
     showConstructDialog(star) {
         const sys            = this.state.getKnownState(star.id)
-        const econLevel      = sys?.knownEconLevel ?? (star.isSol ? 4 : 0)
         const travelYears    = star.isSol ? 0 : (star.distFromSol / CommandSpeedC)
         const projWealth     = this.state.getProjectedWealth(star.id, travelYears)
 
@@ -332,9 +330,8 @@ export class UIController {
         const tbody = document.createElement('tbody')
 
         for (const [typeId, def] of Object.entries(WEAPON_DEFS)) {
-            const canLevel  = econLevel  >= def.minLevel
             const canAfford = projWealth >= def.cost
-            const canBuild  = canLevel && canAfford
+            const canBuild  = canAfford
 
             const row = document.createElement('tr')
             row.innerHTML =
@@ -346,9 +343,7 @@ export class UIController {
             const btn = document.createElement('button')
             btn.textContent = 'Build'
             btn.disabled    = !canBuild
-            if (!canLevel) {
-                btn.title = `Requires economy level ${def.minLevel}`
-            } else if (!canAfford) {
+            if (!canAfford) {
                 btn.title = `Need ${def.cost} wealth (projected: ${projWealth.toFixed(1)})`
             }
             btn.addEventListener('click', () => {

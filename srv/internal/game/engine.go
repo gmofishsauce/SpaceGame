@@ -220,7 +220,7 @@ func (e *Engine) processFleetArrivals() {
 		dest.FleetIDs = appendIfMissing(dest.FleetIDs, fleet.ID)
 
 		// Determine if this arrival is reportable (comm laser at destination)
-		hasCommLaser := dest.LocalUnits[WeaponCommLaser] > 0
+		hasCommLaser := systemHasCommLaser(e.State, dest)
 		arrYear := arrivalYearFor(e.State.Clock, dest.DistFromSol, hasCommLaser)
 		e.State.RecordEvent(&GameEvent{
 			EventYear:   e.State.Clock,
@@ -236,6 +236,27 @@ func (e *Engine) processFleetArrivals() {
 				Units:     copyUnits(fleet.Units),
 			},
 		})
+
+		// Conquest: a human fleet carrying a comm laser that arrives at an
+		// uninhabited system claims it. Economy starts at level 0, wealth 0.
+		if fleet.Owner == HumanOwner &&
+			dest.Status == StatusUninhabited &&
+			fleet.Units[WeaponCommLaser] > 0 {
+
+			dest.Status = StatusHuman
+			dest.EconLevel = 0
+			dest.Wealth = 0
+			dest.EconGrowthYear = e.State.Clock + EconGrowthIntervalYears
+
+			e.State.RecordEvent(&GameEvent{
+				EventYear:   e.State.Clock,
+				ArrivalYear: arrivalYearFor(e.State.Clock, dest.DistFromSol, true),
+				SystemID:    dest.ID,
+				Type:        EventSystemConquered,
+				Description: fmt.Sprintf("Fleet %s established a colony at %s", fleet.Name, dest.DisplayName),
+				CanReport:   true,
+			})
+		}
 	}
 }
 
@@ -315,7 +336,7 @@ func (e *Engine) logCommandFailed(cmd *PendingCommand, err error) {
 		displayName = cmd.TargetID
 		sysID = cmd.TargetID
 	}
-	hasCommLaser := sys != nil && sys.LocalUnits[WeaponCommLaser] > 0
+	hasCommLaser := sys != nil && systemHasCommLaser(e.State, sys)
 	arrYear := arrivalYearFor(e.State.Clock, distFromSol, hasCommLaser)
 	e.State.RecordEvent(&GameEvent{
 		EventYear:   e.State.Clock,
@@ -355,6 +376,24 @@ func alienForcesPresent(state *GameState, sys *StarSystem) bool {
 			continue
 		}
 		if totalUnits(f.Units) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// systemHasCommLaser reports whether a system has a comm laser available,
+// either as a local unit or in any stationed human fleet.
+func systemHasCommLaser(state *GameState, sys *StarSystem) bool {
+	if sys.LocalUnits[WeaponCommLaser] > 0 {
+		return true
+	}
+	for _, fid := range sys.FleetIDs {
+		f := state.Fleets[fid]
+		if f == nil || f.InTransit || f.Owner != HumanOwner {
+			continue
+		}
+		if f.Units[WeaponCommLaser] > 0 {
 			return true
 		}
 	}
