@@ -13,6 +13,10 @@ if ! go build -o spacegame ./srv/cmd/spacegame/; then
     echo FAILED
     exit 1
 fi
+if ! go test $ROOT/srv/... ; then
+    echo Go tests FAILED
+    exit 1
+fi
 
 echo  Build succeeded
 exit 0
