@@ -37,7 +37,7 @@ The requirements below were **derived by the architect** from those inputs. They
 
 - **DR-7 (Bot omniscience preserved).** The alien bot shall continue to read Truth directly. No light-speed gate is imposed on alien decision-making. (DR-1 only protects the player view.)
 
-- **DR-8 (API contract preserved).** The HTTP/SSE API documented in `server_api.md` shall continue to function. Field names and shapes in `/api/stars`, `/api/state`, `/api/events`, `/api/command`, `/api/pause` shall be preserved. New optional fields may be added (e.g. `unitsAsOfYear` on a fleet DTO); no field shall be removed or have its type changed.
+- **DR-8 (API contract preserved).** The HTTP/SSE API documented in `server_api.md` shall continue to function. Field names and shapes in `/api/stars`, `/api/state`, `/api/events`, `/api/command`, `/api/pause` shall be preserved exactly. No field shall be added, removed, or have its type changed as part of this refactor. (Internal server-side snapshot timestamps such as `KnownFleet.AsOfYear` are not exposed to the client.)
 
 - **DR-9 (Test compatibility).** Existing Go tests in `srv/internal/game/game_test.go` shall continue to pass after the refactor. New tests shall enforce the separation (DR-1) and the propagation invariant (DR-2).
 
@@ -137,8 +137,8 @@ The engine holds `state.mu.Lock()` for the entire tick. HTTP handlers take `stat
 
 - **New files:** `srv/internal/game/truth.go`, `srv/internal/game/solview.go`, `srv/internal/game/catalog.go`, `srv/internal/game/eventlog.go`, `srv/internal/game/propagator.go`.
 - **Heavily modified:** `srv/internal/game/state.go` (struct shape), `srv/internal/game/engine.go` (uses new types), `srv/internal/game/loader.go` (constructs new types), `srv/internal/game/economy.go`, `srv/internal/game/combat.go` (mutate Truth, record events), `srv/internal/game/events.go` (becomes mostly SSE plumbing; propagation logic moves to `propagator.go`), `srv/internal/game/types.go` (cleanup).
-- **Lightly modified:** `srv/internal/server/handlers.go` (reads from `SolView` instead of `StarSystem.Known*`), `srv/internal/server/types.go` (DTOs gain `unitsAsOfYear` snapshot field on fleets).
-- **Unchanged:** `srv/cmd/spacegame/main.go` (other than passing an `*rand.Rand` for DR-11), CSV files, web frontend (other than possibly a one-line adjustment in `web/src/state.js` if a DTO field is renamed; ideally none).
+- **Lightly modified:** `srv/internal/server/handlers.go` (reads from `SolView` instead of `StarSystem.Known*`).
+- **Unchanged:** `srv/internal/server/types.go` (public DTO shapes preserved), `srv/cmd/spacegame/main.go` (other than passing an `*rand.Rand` for DR-11), CSV files, web frontend, `server_api.md`.
 
 ## 6. Detailed Design
 
@@ -354,10 +354,10 @@ for evt := range state.Events.PopMatured(state.Clock):
 
   - **`EventConstructionDone`** with `*ConstructionDetails`: subtract `def.Cost * Quantity` from `KnownSystem.Wealth` (DR-6). If `def.CanMove` is **false**, add `Quantity` to `KnownSystem.LocalUnits[wt]`. If `def.CanMove` is **true** (DR-5), apply to a `KnownFleet`:
 
-    - If the system's `KnownSystem.PrimaryFleetID` exists in `SolView.Fleets`, add to it; bump that fleet's `AsOfYear`.
-    - Otherwise, create a new `KnownFleet` with snapshot units `{wt: Quantity}`, owner `HumanOwner`, location = system ID, name = `<DisplayName>-1st Fleet`, `AsOfYear = EventYear`. Append the new fleet ID to `KnownSystem.FleetIDs`; set `KnownSystem.PrimaryFleetID`.
+    - Look up `Details.FleetID` in `SolView.Fleets`. If it exists, add `Quantity` of `wt` to its `Units` and bump its `AsOfYear`.
+    - Otherwise, create a new `KnownFleet` with that exact `FleetID`, snapshot units `{wt: Quantity}`, owner `HumanOwner`, location = system ID, name = `Details.FleetName`, `AsOfYear = EventYear`. Append the new fleet ID to `KnownSystem.FleetIDs`.
 
-    The `ConstructionDetails` struct gains a field `PrimaryFleetID string` (the truth-side primary at the moment of construction) so the propagator can mirror the truth-side decision rather than recomputing it.
+    The `ConstructionDetails` struct gains two fields: `FleetID string` and `FleetName string`. These record the exact truth-side fleet that received the units (existing primary, or freshly-minted) and its name; the propagator mirrors the truth-side decision rather than recomputing it. This keeps `KnownFleet` IDs in lockstep with `TrueFleet` IDs so future events keyed by fleet ID resolve to the same object on both sides.
 
   - **`EventFleetArrival`** with `*FleetArrivalDetails`: take a snapshot. Insert/update `SolView.Fleets[FleetID]` with `Units = copy(Details.Units)`, `Name = Details.FleetName`, `LocationID = SystemID`, `AsOfYear = EventYear`. Append to `KnownSystem.FleetIDs` (de-duplicated). Remove from `SolView.InTransit[FleetID]` if present.
 
@@ -436,12 +436,48 @@ The lowercase `truth` field is the compile-time barrier required by DR-1: code o
 The following are explicitly **not** part of this design's scope but are listed so the developer recognizes them as follow-ons (and does not pre-emptively refactor in a direction that conflicts):
 
 - **Channels (review item D):** introduce a `Channel` enum so the propagator can model multiple competing reports per event.
-- **Reporter survival coupling (review item E):** condition `Event.ArrivalYear` on the survival of an associated reporter fleet.
+- **Reporter survival coupling (review item E):** condition `Event.ArrivalYear` on the survival of an associated reporter fleet. **See §6.8 — a maintainer-visible source comment is required as part of this refactor so the latent issue is found if it ever becomes real.**
 - **Bot light-speed pipeline (review item #8):** route `BotCommand`s through `PendingCmds`.
 - **SSE batching and recovery (review item H):** tick-coalesced frames; client recovery on buffer overflow.
 - **Event-log compaction (review item F second half):** drop or cold-tier old events.
 
 The data structures in this design accommodate all five without further restructuring.
+
+### 6.8 Required source comment: deferred reporter coupling
+
+The deferral of reporter survival coupling (§6.7, review item E) is a deliberate choice but rests on a fragile current-game-rules assumption: reporters cannot die in transit, because there is no in-transit combat. If that assumption is ever broken — by adding patrols, in-transit interception, alien escorts that engage passing fleets, or any other mechanism that lets a fleet be destroyed mid-flight — then `Combat` reports keyed to a now-destroyed reporter will still arrive at Sol, which is wrong.
+
+To make sure a future maintainer notices, the developer **shall** add the following block comment in `srv/internal/game/combat.go`, immediately above the call site in `Resolve` that records the combat event using `reportArrivalYear` (i.e., where the report's `ArrivalYear` is set without checking that the reporter survives):
+
+```go
+// DEFERRED: reporter survival is not coupled to report delivery.
+//
+// Today, when combat occurs at a system without a comm laser, we spawn
+// reporter fleets toward Sol AND record the combat Event with an
+// ArrivalYear keyed to the reporter's ETA at 0.8c. The two are
+// independent: the Event is delivered to SolView when its ArrivalYear
+// matures, regardless of whether the reporter fleet still exists.
+//
+// This is currently safe ONLY because reporters cannot be destroyed in
+// transit (no in-transit combat exists in the game). If that ever
+// changes -- in-transit interception, alien patrols, escorts that
+// engage passing fleets, or any other mechanism by which a fleet may
+// die en route -- this becomes a real bug: the player will receive
+// reports that should have been lost with their carrier.
+//
+// Fix when needed (review item E in architecturalreview.md):
+//   - give TrueFleet a CarriedEvents []*Event field
+//   - have combat attach the report to the spawned reporter fleet
+//     instead of calling state.Events.Record() directly here
+//   - in processFleetArrivals, Record() each carried event when the
+//     fleet lands; on fleet destruction, drop them
+// The propagation pipeline introduced by the dual-state refactor
+// already supports this without further restructuring.
+```
+
+The same comment shall also be added at the top of `extractAndSendReporters` so a maintainer reading the reporter-spawn path sees the warning immediately.
+
+Rationale for putting this in source rather than only in design docs: design documents drift out of sync with code over time. A `git grep DEFERRED` on the source tree will always find this. The comment is verbose by intent — it tells a maintainer who has never read `architecturalreview.md` exactly what is wrong, when it becomes wrong, and how to fix it.
 
 ## 7. Data Model
 
@@ -470,9 +506,11 @@ GameState
 
 ### 7.2 DTO changes (`server_api.md` impact)
 
-- **`/api/state`** continues to return `SystemDTO` and `FleetDTO` arrays. `FleetDTO` gains an optional `unitsAsOfYear: number` field carrying `KnownFleet.AsOfYear` (or, for an in-transit fleet, the transit's `AsOfYear`). For Sol's own fleets, the field is set to `state.Clock`. Clients that ignore it continue to work; the SPA in `web/src/state.js` and `web/src/sidebar.js` may surface it later but is not required to.
+There are **no DTO field changes** in this refactor. All public JSON shapes are preserved exactly:
+
+- **`/api/state`** continues to return `SystemDTO` and `FleetDTO` arrays with their current fields. The server-internal `KnownFleet.AsOfYear` is **not** exposed; it exists only in `SolView` for server-side correctness and for the property test in §11.
 - **SSE `system_update`** continues to carry the same fields it carries today, sourced from `KnownSystem` (and from `SolGroundTruthSnapshot` for `sol`).
-- **SSE `fleet_departed`** continues to be sent, but now via the propagator at the moment the departure event matures at Sol — not at the moment of physical departure at the source system.
+- **SSE `fleet_departed`** continues to be sent with the same payload, but now via the propagator at the moment the departure event matures at Sol — not at the moment of physical departure at the source system. Clients see the same JSON; only the timing changes.
 
 ### 7.3 Persisted data
 
@@ -493,7 +531,8 @@ This is an in-memory refactor. There is no data migration. On version bump, in-f
 | Event maturation index? | (a) Linear scan with cursor. (b) Min-heap by ArrivalYear. (c) Separate matured / unmatured slices. | (b) Min-heap. | (a) is fragile because events with later EventYear can have earlier ArrivalYear (closer system + comm laser vs. distant system). (b) is `O(log n)` per insert/extract and uses Go's stdlib `container/heap`. (c) needs partition cost on every tick. |
 | Fleet-departure visibility? | (a) Keep `BroadcastFleetDeparted` synchronous (status quo, leak). (b) New `EventFleetDeparted` event type, propagated normally. | (b). | (a) violates DR-3. (b) reuses the propagation primitive and is symmetric with `EventFleetArrival`. |
 | RNG injection? | (a) Keep `time.Now().UnixNano()` seeding internally. (b) Inject `*rand.Rand` from `main.go`, default time-seeded. | (b). | (b) preserves current default behavior (time-seeded) but allows tests to seed deterministically (DR-11, fixes review defect #12). One-line change to `main.go`. |
-| Backward compatibility for client? | (a) Allow DTO field renames in this refactor. (b) Strict additive-only. | (b) Additive-only. | (a) drags in a frontend change. (b) keeps the refactor server-only. |
+| Backward compatibility for client? | (a) Allow DTO field renames. (b) Additive-only (add `unitsAsOfYear`). (c) Strict no-change to public DTOs. | (c) No public DTO change. | (a) drags in a frontend change. (b) was the original draft, but `KnownSystem.knownAsOfYear` already conveys staleness; per-fleet timestamp is unused by the client and would only add noise. (c) keeps the refactor invisible to the client and confines the snapshot semantics to server-internal state. |
+| Where to record the deferred reporter coupling? | (a) Design doc only. (b) Source comment only. (c) Both. | (c) Both. | Design docs drift; source comments are found by `git grep`. The maintainer who wakes the latent bug is far more likely to be reading `combat.go` than `REVIEW/updateddesign.md`. See §6.8. |
 | Where should `applyEventToView` live? | (a) Method on `SolView`. (b) Method on `Propagator`. | (b). | (a) mixes mutation with the data type. (b) keeps `SolView` a pure data container; the `Propagator` is the only writer, which makes DR-2 grep-able (`grep -r 'state\.SolView\.' srv/internal/game/` should return only propagator code plus loader). |
 | Snapshot copy semantics for `Units`? | (a) Share map by reference. (b) Deep copy on each write. | (b). | (a) reintroduces the aliasing leak we are fixing. (b) costs a few microseconds per event; trivial. Use the existing `copyUnits` helper. |
 
@@ -510,22 +549,22 @@ All paths are relative to repo root.
 - `srv/internal/game/state.go` — **MODIFY** — `GameState` now embeds `*Truth`, `*SolView`, `*StarCatalog`, `*EventLog`. Remove `Systems`, `SystemOrder`, `Fleets`, `Events`. Remove `UpdateKnownStates`, `applyEventToKnownState`. Add `Truth()`, `ReadSolGroundTruth()`. Keep ID generators, `RecordEvent`, `ApplyCommand`, `CheckVictory`. The `ApplyCommand` body is rewritten to mutate `state.truth` and to record `Event`s (no more direct mutation of `Known*` fields).
 - `srv/internal/game/engine.go` — **MODIFY** — Tick uses `state.truth` for mutation, `state.Events` for recording, `state.Propagator` for propagation. Delete `BroadcastFleetDeparted` calls; replace with `Event` recording. Engine constructor takes a `*rand.Rand`.
 - `srv/internal/game/loader.go` — **MODIFY** — Build `*StarCatalog` first, then `*Truth`, then seed `*SolView` from initial Truth (preserving G-4 / today's behavior). Initial alien presence at entry-point systems is recorded in `Truth` only; `SolView` reflects the player's pre-game view (no alien knowledge). Initial fleets at human systems are mirrored into `SolView.Fleets` as snapshots. Take an optional `*rand.Rand`.
-- `srv/internal/game/economy.go` — **MODIFY** — `AccumulateWealth`, `AdvanceEconLevels`, `ApplyEconomicCombatPenalty`, `ValidateConstruct`, `ExecuteConstruct`, `ExecuteCreateFleet`, `ExecuteReassign` operate on `*Truth` (passed in) and record `*Event`s (passed-in `*EventLog`). The `ConstructionDetails` struct gains `PrimaryFleetID string`.
-- `srv/internal/game/combat.go` — **MODIFY** — `Resolve`, helpers operate on `*Truth`. The reporter-spawn behavior is preserved as today (deferred; not part of this refactor).
+- `srv/internal/game/economy.go` — **MODIFY** — `AccumulateWealth`, `AdvanceEconLevels`, `ApplyEconomicCombatPenalty`, `ValidateConstruct`, `ExecuteConstruct`, `ExecuteCreateFleet`, `ExecuteReassign` operate on `*Truth` (passed in) and record `*Event`s (passed-in `*EventLog`). When `ExecuteConstruct` records an `EventConstructionDone` for a mobile weapon, it shall populate `ConstructionDetails.FleetID` and `ConstructionDetails.FleetName` with the truth-side fleet that received the units (whether existing primary or freshly minted), so the propagator can mirror the decision.
+- `srv/internal/game/combat.go` — **MODIFY** — `Resolve`, helpers operate on `*Truth`. The reporter-spawn behavior is preserved as today (Phase-2 deferral). **The developer shall add the `DEFERRED:` block comment specified in §6.8 in two places: above the `state.Events.Record(...)` call in `Resolve` whose `ArrivalYear` comes from `reportArrivalYear`, and at the top of `extractAndSendReporters`.**
 - `srv/internal/game/events.go` — **MODIFY** — Becomes purely SSE plumbing. `EventManager` keeps client registry, sse-frame formatting, `BroadcastConnected`. Remove `BroadcastMatured` (replaced by `Propagator.Propagate`). Remove `BroadcastFleetDeparted`. The `eventToMap`, `fleetToMap`, `systemToMap`, `fullStateMap` serializers are rewritten to read from `*SolView` (and from `ReadSolGroundTruth()` for `sol`).
-- `srv/internal/game/types.go` — **MODIFY** — Add `EventFleetDeparted` constant. Add `FleetDepartureDetails` struct. Add `PrimaryFleetID` to `ConstructionDetails`. Move static catalogue-y types to `catalog.go`.
+- `srv/internal/game/types.go` — **MODIFY** — Add `EventFleetDeparted` constant. Add `FleetDepartureDetails` struct. Add `FleetID string` and `FleetName string` to `ConstructionDetails`. Move static catalogue-y types to `catalog.go`.
 - `srv/internal/game/bot.go` — **MODIFY** — `DefaultBot.Tick(state, year)` reads `state.Truth()` instead of bare `state.Systems`/`state.Fleets`. Logic unchanged.
 
 - `srv/internal/server/handlers.go` — **MODIFY** — `handleStars` reads `state.Catalog`. `handleState` and `buildSystemDTO` read `state.SolView` plus `state.ReadSolGroundTruth()` for sol. No reference to `state.Truth()` from the server package.
-- `srv/internal/server/types.go` — **MODIFY** — Add `UnitsAsOfYear *float64` to `FleetDTO` (omitempty).
+- `srv/internal/server/types.go` — **No change.** Public DTO shapes are preserved.
 
 - `srv/internal/game/game_test.go` — **MODIFY** — Update existing tests to construct the new types via the loader (or via a new test-helper `NewTestState(t)`). Add new tests per §11.
 
 - `srv/cmd/spacegame/main.go` — **MODIFY** — Construct `rng := rand.New(rand.NewSource(time.Now().UnixNano()))`; pass to `Initialize` and `NewEngine`. Optional `--seed` flag.
 
-- `web/src/state.js` — **MODIFY (defensive)** — If `unitsAsOfYear` is present on a fleet DTO, retain it (for future UI use). No display change required.
+- `web/src/state.js` — **No change.** Public DTO shapes are preserved; the client is not affected by this refactor.
 
-- `server_api.md` — **MODIFY** — Document the optional `unitsAsOfYear` field on fleet DTOs and the unchanged shape of every other endpoint.
+- `server_api.md` — **No change.** Endpoint shapes are unchanged.
 
 ## 10. Requirement Traceability
 
@@ -533,12 +572,12 @@ All paths are relative to repo root.
 |---|---|---|
 | DR-1 (Strict separation) | §5.1, §6.2, §6.3, §6.6 | `truth.go`, `solview.go`, `state.go`, `handlers.go` |
 | DR-2 (Single propagation primitive) | §5.2 step 8, §6.4, §6.5 | `eventlog.go`, `propagator.go`, `engine.go` |
-| DR-3 (Light-speed gating of all changes) | §6.4 (new `EventFleetDeparted`), §6.5 (apply step), §6.6 (engine restructure) | `eventlog.go`, `propagator.go`, `engine.go`, `combat.go`, `economy.go` |
+| DR-3 (Light-speed gating of all changes) | §6.4 (new `EventFleetDeparted`), §6.5 (apply step), §6.6 (engine restructure), §6.8 (deferred reporter coupling — documented latent gap) | `eventlog.go`, `propagator.go`, `engine.go`, `combat.go`, `economy.go` |
 | DR-4 (Snapshot fleets) | §6.3, §6.5 (`EventFleetArrival`/`EventFleetDeparted` cases) | `solview.go`, `propagator.go` |
 | DR-5 (Mobile-unit construction reportable) | §6.5 (`EventConstructionDone` mobile case) | `propagator.go`, `economy.go`, `types.go` |
 | DR-6 (Wealth deductions reportable) | §6.5 (`EventConstructionDone` wealth update) | `propagator.go` |
 | DR-7 (Bot omniscience) | §5.1, §6.2, §6.6 (`Truth()` accessor) | `bot.go`, `state.go` |
-| DR-8 (API contract preserved) | §7.2 | `handlers.go`, `server/types.go`, `server_api.md` |
+| DR-8 (API contract preserved) | §7.2 | `handlers.go` (no DTO field changes; `server/types.go` and `server_api.md` unchanged) |
 | DR-9 (Test compatibility) | §11 | `game_test.go` |
 | DR-10 (Engine perf: indexed events) | §6.4 | `eventlog.go` |
 | DR-11 (Determinism seam) | §6.6, §9 (main.go) | `engine.go`, `loader.go`, `main.go` |
@@ -587,10 +626,12 @@ After build, `./spacegame` and visit `http://localhost:8080`. Run a typical sess
 
 ## 12. Open Questions
 
-None blocking. The design assumes:
+None. Three questions raised in the review of an earlier draft of this design have all been resolved:
 
-1. The new optional `unitsAsOfYear` DTO field is acceptable to the user. (If not, it can be omitted; the snapshot semantics on the server are unaffected.)
-2. The `ConstructionDetails.PrimaryFleetID` field added in §6.5 is acceptable. (It is needed so the propagator can mirror the truth-side primary-fleet decision when applying construction; without it, the player's view could create a different fleet than the truth.)
-3. The decision to keep reporter behavior unchanged in this refactor (deferring review item E) is acceptable. Today reporters do not actually condition the report; that is preserved as a known limitation.
+1. **`unitsAsOfYear` DTO field** — **Dropped.** Public DTO shapes are preserved unchanged. `KnownSystem.knownAsOfYear` already conveys staleness; a per-fleet timestamp would be unused noise. The internal `KnownFleet.AsOfYear` field is retained for server-side correctness and for the property test in §11 but is not exposed.
 
-If any of these three is unacceptable, raise it before implementation begins.
+2. **`ConstructionDetails` augmentation** — **Resolved as `FleetID` + `FleetName`** (not the originally proposed `PrimaryFleetID`). The truth-side `ExecuteConstruct` records the exact fleet that received the units (existing primary, or freshly minted) so the propagator can mirror the decision. This handles both branches uniformly and keeps `KnownFleet` IDs in lockstep with `TrueFleet` IDs.
+
+3. **Reporter survival coupling** — **Deferred** (Phase-2 per §6.7). The current behavior is preserved. The latent issue (reports key on reporter ETA but are not coupled to reporter survival) is documented in source via the mandatory `DEFERRED:` block comment specified in §6.8 and recorded in two places in `combat.go`. A maintainer who later adds in-transit fleet vulnerability will encounter the comment.
+
+The developer may begin implementation.
