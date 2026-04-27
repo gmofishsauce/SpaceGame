@@ -1,0 +1,38 @@
+hi Claude. Here in /Users/jeff/go/src/github.com/gmofishsauce/SpaceGame
+there is a game, implemented as a  single page application, provided
+by a small server written in Golang. The server offers  APIs so it
+can act as the authoritative source of game information. The SPA
+is implemented entirely in JavaScript. In this repo, the code is
+authoritative. Specifications are not.
+
+The game is a slow moving model of interstellar warfare with speed
+of light delays playing a key role. The intent is that the players
+view of the entire star cluster (battle area) is based on the
+assumption of actions and state updates that are greatly delayed
+when viewed from Sol's frame of reference.  effect. The displayed
+state resulting from those actions may be corrected to reality later
+when new, lightspeed-delayed information arrives at Sol.
+
+Example: the player, acting at Sol, may send a command to distant
+star system S1 to assemble a fleet "S1-2nd fleet" there and may
+then issue a second command to send "S1-2nd fleet" to a third star
+system S3. The starmap should show an amber arrow for the fleet-assembly
+command in-flight, and then a second amber arrow for the motion of
+the fleet. But no confirmation from the distant star system has
+been received, because of speed of light delay.  If S2 has a comm
+laser, it may later turn out that S2 was captured by aliens before
+the fleet assembly command could even have been executed. This
+information would be shown to the player, correcting the visual
+display, when the information arrives at Sol. So there are two
+completely distinct game states at every point in time; the state
+shown to the player, based on information received at Sol,
+and an omniscient view of the real state of all star systems in
+their own frames of reference.
+
+I did not appreciate the full complexity of the game implementation
+when I began working with Claude in the Sonnet model to implement
+the code. So I suspect the implementation is inadequate to meet
+the requirements. Please review the code and give me your opinion
+about this. In addition, please make architectural level suggestions
+about how you would change the code to meet these requirements.
+
