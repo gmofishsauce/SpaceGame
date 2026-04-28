@@ -53,6 +53,7 @@ type EventType string
 
 const (
 	EventFleetArrival    EventType = "fleet_arrival"
+	EventFleetDeparted   EventType = "fleet_departed"
 	EventCombatOccurred  EventType = "combat_occurred"  // reporter or comm laser present: full details
 	EventCombatSilent    EventType = "combat_silent"    // no reporter: internal only, never broadcast
 	EventSystemCaptured  EventType = "system_captured"
@@ -93,6 +94,13 @@ type CombatDetails struct {
 type ConstructionDetails struct {
 	WeaponType WeaponType `json:"weaponType"`
 	Quantity   int        `json:"quantity"`
+	// FleetID and FleetName are server-internal fields (not exposed in the
+	// public DTO, hence json:"-"). They record the truth-side fleet that
+	// received the units when WeaponType is mobile, so the propagator can
+	// mirror the truth-side decision into SolView. Empty for non-mobile
+	// constructions.
+	FleetID   string `json:"-"`
+	FleetName string `json:"-"`
 }
 
 // CommandFailedDetails is the payload for EventCommandFailed.
@@ -112,4 +120,18 @@ type FleetArrivalDetails struct {
 	FleetName string             `json:"fleetName"`
 	Owner     Owner              `json:"owner"`
 	Units     map[WeaponType]int `json:"units"`
+}
+
+// FleetDepartureDetails is the payload for EventFleetDeparted.
+// Mirrors KnownTransit so the propagator can construct the player-visible
+// in-transit record at maturation time.
+type FleetDepartureDetails struct {
+	FleetID     string             `json:"fleetId"`
+	FleetName   string             `json:"fleetName"`
+	Owner       Owner              `json:"owner"`
+	Units       map[WeaponType]int `json:"units"`
+	SourceID    string             `json:"sourceId"`
+	DestID      string             `json:"destId"`
+	DepartYear  float64            `json:"departYear"`
+	ArrivalYear float64            `json:"arrivalYear"`
 }

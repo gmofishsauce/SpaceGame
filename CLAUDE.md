@@ -1,6 +1,6 @@
 # SpaceGame
 
-A limited-information real-time strategy game set in an interstellar war. A human player defends a sphere of colonized star systems against alien incursions, hampered by light-speed communication delays. The code is authoritative; specs in `OLD_SPECS/` are historical only.
+A limited-information real-time strategy game set in an interstellar war. A human player defends a sphere of colonized star systems against alien incursions, hampered by light-speed communication delays. Specs in `OLD_SPECS/` are historical only.
 
 ## Architecture
 

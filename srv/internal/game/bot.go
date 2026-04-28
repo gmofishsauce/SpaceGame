@@ -16,7 +16,7 @@ type BotAgent interface {
 	Tick(state *GameState, currentYear float64) []BotCommand
 
 	// OnEvent is called for every newly-broadcast event.
-	OnEvent(evt *GameEvent)
+	OnEvent(evt *Event)
 }
 
 // BotCommand is a command returned by BotAgent.Tick for immediate execution.
@@ -68,9 +68,9 @@ func (b *DefaultBot) Tick(state *GameState, currentYear float64) []BotCommand {
 
 	// For each alien fleet that is stationed (not in transit), dispatch it
 	// toward the highest-priority target that no other alien fleet is heading to.
-	inbound := alienInboundTargets(state)
+	inbound := alienInboundTargets(state.Truth())
 
-	for _, fleet := range state.Fleets {
+	for _, fleet := range state.Truth().Fleets {
 		if fleet.Owner != AlienOwner || fleet.InTransit || fleet.LocationID == "" {
 			continue
 		}
@@ -82,22 +82,22 @@ func (b *DefaultBot) Tick(state *GameState, currentYear float64) []BotCommand {
 			if inbound[targetID] {
 				continue
 			}
-			destSys, ok := state.Systems[targetID]
-			if !ok {
+			destSys := state.Truth().System(targetID)
+			if destSys == nil {
 				continue
 			}
-			srcSys, ok := state.Systems[fleet.LocationID]
-			if !ok {
+			srcSys := state.Truth().System(fleet.LocationID)
+			if srcSys == nil {
 				continue
 			}
 			if srcSys.ID == destSys.ID {
 				continue // already there
 			}
 			cmds = append(cmds, BotCommand{
-				Type:    CmdMove,
+				Type:     CmdMove,
 				SystemID: fleet.LocationID,
-				FleetID: fleet.ID,
-				DestID:  targetID,
+				FleetID:  fleet.ID,
+				DestID:   targetID,
 			})
 			inbound[targetID] = true
 			break
@@ -107,7 +107,7 @@ func (b *DefaultBot) Tick(state *GameState, currentYear float64) []BotCommand {
 	return cmds
 }
 
-func (b *DefaultBot) OnEvent(evt *GameEvent) {
+func (b *DefaultBot) OnEvent(evt *Event) {
 	// DefaultBot does not react to individual events; it re-evaluates on every Tick.
 }
 
@@ -122,17 +122,13 @@ func humanTargetsByProximity(state *GameState) []string {
 	}
 
 	var candidates []scored
-	for id, sys := range state.Systems {
+	for id, sys := range state.Truth().Systems {
 		if sys.Status != StatusHuman {
 			continue
 		}
 		minDist := 1e18
 		for _, epID := range state.Alien.EntryPointIDs {
-			ep, ok := state.Systems[epID]
-			if !ok {
-				continue
-			}
-			d := distBetween(sys, ep)
+			d := state.Catalog.Distance(id, epID)
 			if d < minDist {
 				minDist = d
 			}
@@ -151,9 +147,9 @@ func humanTargetsByProximity(state *GameState) []string {
 
 // alienInboundTargets returns a set of system IDs that alien fleets are
 // already heading toward.
-func alienInboundTargets(state *GameState) map[string]bool {
+func alienInboundTargets(truth *Truth) map[string]bool {
 	inbound := map[string]bool{}
-	for _, fleet := range state.Fleets {
+	for _, fleet := range truth.Fleets {
 		if fleet.Owner == AlienOwner && fleet.InTransit && fleet.DestID != "" {
 			inbound[fleet.DestID] = true
 		}

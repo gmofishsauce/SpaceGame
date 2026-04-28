@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gmofishsauce/SpaceGame/srv/internal/game"
 	"github.com/gmofishsauce/SpaceGame/srv/internal/server"
@@ -40,15 +42,16 @@ func main() {
 		log.Printf("server v.unknown started")
 	}
 
-	state, err := game.Initialize(nearestCSV, planetsCSV)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	state, err := game.Initialize(rng, nearestCSV, planetsCSV)
 	if err != nil {
 		log.Fatalf("initializing game state: %v", err)
 	}
-	log.Printf("loaded %d star systems", len(state.Systems))
+	log.Printf("loaded %d star systems", len(state.Catalog.Order))
 
 	events := game.NewEventManager()
 	bot := game.NewDefaultBot()
-	engine := game.NewEngine(state, bot, events)
+	engine := game.NewEngine(state, bot, events, rng)
 
 	go engine.Run(ctx)
 

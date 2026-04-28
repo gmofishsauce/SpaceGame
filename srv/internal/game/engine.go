@@ -19,12 +19,15 @@ type Engine struct {
 }
 
 // NewEngine creates an Engine wired to the given state, bot, and event manager.
-func NewEngine(state *GameState, bot BotAgent, events *EventManager) *Engine {
+// rng is injected (DR-11) so tests can seed deterministically. The Propagator
+// is constructed here and stored on state.
+func NewEngine(state *GameState, bot BotAgent, events *EventManager, rng *rand.Rand) *Engine {
+	state.Propagator = NewPropagator(events)
 	return &Engine{
 		State:  state,
 		Bot:    bot,
 		Events: events,
-		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng:    rng,
 	}
 }
 
@@ -67,14 +70,15 @@ func (e *Engine) EnqueueCommand(cmd *PendingCommand) (string, float64, error) {
 	e.State.Lock()
 	defer e.State.Unlock()
 
-	sys, ok := e.State.Systems[cmd.TargetID]
-	if !ok {
+	cat := e.State.Catalog.Get(cmd.TargetID)
+	if cat == nil {
 		return "", 0, fmt.Errorf("unknown system %q", cmd.TargetID)
 	}
 
-	// Quick known-state validation (full validation happens at execution time)
+	// Quick known-state validation against SolView (full validation happens
+	// at execution time against Truth).
 	if cmd.TargetID != "sol" {
-		if sys.KnownStatus == StatusAlien {
+		if ks := e.State.SolView.System(cmd.TargetID); ks != nil && ks.Status == StatusAlien {
 			return "", 0, fmt.Errorf("system %q is known to be alien-held; cannot issue commands", cmd.TargetID)
 		}
 	}
@@ -83,11 +87,7 @@ func (e *Engine) EnqueueCommand(cmd *PendingCommand) (string, float64, error) {
 	if cmd.TargetID == "sol" {
 		executeYear = e.State.Clock // immediate for Sol
 	} else {
-		sol := e.State.Systems["sol"]
-		if sol == nil {
-			return "", 0, fmt.Errorf("sol system not found")
-		}
-		executeYear = e.State.Clock + distBetween(sol, sys)/CommandSpeedC
+		executeYear = e.State.Clock + e.State.Catalog.Distance("sol", cmd.TargetID)/CommandSpeedC
 	}
 
 	cmd.ID = e.State.NewCommandID()
@@ -117,12 +117,9 @@ func (e *Engine) tick() {
 		if cmd.ExecuteYear <= e.State.Clock {
 			if err := e.State.ApplyCommand(cmd); err != nil {
 				e.logCommandFailed(cmd, err)
-			} else if cmd.Type == CmdMove {
-				// Broadcast fleet departure so the client can render an in-transit arrow.
-				if f, ok := e.State.Fleets[cmd.FleetID]; ok && f.InTransit && f.Owner == HumanOwner {
-					e.Events.BroadcastFleetDeparted(f)
-				}
 			}
+			// Note: fleet-departure broadcasting now happens via EventFleetDeparted
+			// recorded inside ApplyCommand; no synchronous broadcast here.
 		} else {
 			remaining = append(remaining, cmd)
 		}
@@ -134,8 +131,8 @@ func (e *Engine) tick() {
 	AdvanceEconLevels(e.State)
 
 	// Check for and resolve combat in any system where both sides are present.
-	for _, sys := range e.State.Systems {
-		if humanForcesPresent(e.State, sys) && alienForcesPresent(e.State, sys) {
+	for _, sys := range e.State.truth.Systems {
+		if humanForcesPresent(e.State.truth, sys) && alienForcesPresent(e.State.truth, sys) {
 			Resolve(e.rng, e.State, sys)
 		}
 	}
@@ -162,11 +159,9 @@ func (e *Engine) tick() {
 		}
 	}
 
-	// Update known states for all systems.
-	e.State.UpdateKnownStates(e.State.Clock)
-
-	// Broadcast matured events via SSE.
-	e.Events.BroadcastMatured(e.State)
+	// Propagate matured events: apply to SolView and broadcast SSE.
+	// Replaces the old UpdateKnownStates + BroadcastMatured pair.
+	e.State.Propagator.Propagate(e.State)
 
 	// Periodic clock sync broadcast (every ClockSyncCadence ticks).
 	if e.tickCount%ClockSyncCadence == 0 {
@@ -185,28 +180,26 @@ func (e *Engine) tick() {
 
 // processFleetArrivals moves fleets that have completed their transit.
 func (e *Engine) processFleetArrivals() {
-	for _, fleet := range e.State.Fleets {
+	for _, fleet := range e.State.truth.Fleets {
 		if !fleet.InTransit || fleet.ArrivalYear > e.State.Clock {
 			continue
 		}
-		dest, ok := e.State.Systems[fleet.DestID]
-		if !ok {
+		dest := e.State.truth.System(fleet.DestID)
+		if dest == nil {
 			log.Printf("engine: fleet %s destination %q not found, removing", fleet.ID, fleet.DestID)
-			delete(e.State.Fleets, fleet.ID)
+			delete(e.State.truth.Fleets, fleet.ID)
 			continue
 		}
 
 		// Reporter fleets arriving at Sol are consumed (their event was already logged).
 		if fleet.DestID == "sol" && fleet.Owner == HumanOwner && fleetIsReporterOnly(fleet) {
-			// Reporter arrival: the fleet itself is consumed.
-			delete(e.State.Fleets, fleet.ID)
-			e.State.RecordEvent(&GameEvent{
+			delete(e.State.truth.Fleets, fleet.ID)
+			e.State.Events.Record(&Event{
 				EventYear:   fleet.ArrivalYear,
 				ArrivalYear: fleet.ArrivalYear,
 				SystemID:    "sol",
 				Type:        EventReporterReturn,
 				Description: fmt.Sprintf("Reporter fleet %s returned to Sol with intelligence", fleet.Name),
-				CanReport:   true,
 			})
 			continue
 		}
@@ -220,15 +213,20 @@ func (e *Engine) processFleetArrivals() {
 		dest.FleetIDs = appendIfMissing(dest.FleetIDs, fleet.ID)
 
 		// Determine if this arrival is reportable (comm laser at destination)
-		hasCommLaser := systemHasCommLaser(e.State, dest)
-		arrYear := arrivalYearFor(e.State.Clock, dest.DistFromSol, hasCommLaser)
-		e.State.RecordEvent(&GameEvent{
+		hasCommLaser := systemHasCommLaser(e.State.truth, dest)
+		distFromSol := 0.0
+		displayName := dest.ID
+		if c := e.State.Catalog.Get(dest.ID); c != nil {
+			distFromSol = c.DistFromSol
+			displayName = c.DisplayName
+		}
+		arrYear := arrivalYearFor(e.State.Clock, distFromSol, hasCommLaser)
+		e.State.Events.Record(&Event{
 			EventYear:   e.State.Clock,
 			ArrivalYear: arrYear,
 			SystemID:    dest.ID,
 			Type:        EventFleetArrival,
-			Description: fmt.Sprintf("Fleet %s arrived at %s", fleet.Name, dest.DisplayName),
-			CanReport:   hasCommLaser,
+			Description: fmt.Sprintf("Fleet %s arrived at %s", fleet.Name, displayName),
 			Details: &FleetArrivalDetails{
 				FleetID:   fleet.ID,
 				FleetName: fleet.Name,
@@ -248,13 +246,12 @@ func (e *Engine) processFleetArrivals() {
 			dest.Wealth = 0
 			dest.EconGrowthYear = e.State.Clock + EconGrowthIntervalYears
 
-			e.State.RecordEvent(&GameEvent{
+			e.State.Events.Record(&Event{
 				EventYear:   e.State.Clock,
-				ArrivalYear: arrivalYearFor(e.State.Clock, dest.DistFromSol, true),
+				ArrivalYear: arrivalYearFor(e.State.Clock, distFromSol, true),
 				SystemID:    dest.ID,
 				Type:        EventSystemConquered,
-				Description: fmt.Sprintf("Fleet %s established a colony at %s", fleet.Name, dest.DisplayName),
-				CanReport:   true,
+				Description: fmt.Sprintf("Fleet %s established a colony at %s", fleet.Name, displayName),
 			})
 		}
 	}
@@ -263,13 +260,13 @@ func (e *Engine) processFleetArrivals() {
 // spawnAlienForces adds a wave of alien forces at each entry point.
 func (e *Engine) spawnAlienForces() {
 	for _, epID := range e.State.Alien.EntryPointIDs {
-		ep, ok := e.State.Systems[epID]
-		if !ok {
+		ep := e.State.truth.System(epID)
+		if ep == nil {
 			continue
 		}
 		fleetID := e.State.NewFleetID()
 		fleetName := e.State.NewFleetName()
-		fleet := &Fleet{
+		fleet := &TrueFleet{
 			ID:         fleetID,
 			Name:       fleetName,
 			Owner:      AlienOwner,
@@ -277,17 +274,21 @@ func (e *Engine) spawnAlienForces() {
 			LocationID: epID,
 			InTransit:  false,
 		}
-		e.State.Fleets[fleetID] = fleet
+		e.State.truth.Fleets[fleetID] = fleet
 		ep.FleetIDs = append(ep.FleetIDs, fleetID)
 		ep.Status = StatusAlien
 
-		e.State.RecordEvent(&GameEvent{
+		displayName := epID
+		if c := e.State.Catalog.Get(epID); c != nil {
+			displayName = c.DisplayName
+		}
+		e.State.Events.Record(&Event{
 			EventYear:   e.State.Clock,
-			ArrivalYear: e.State.Clock, // internal only
+			ArrivalYear: e.State.Clock, // does not matter; Internal=true
 			SystemID:    epID,
 			Type:        EventAlienSpawn,
-			Description: fmt.Sprintf("Alien forces reinforced at %s", ep.DisplayName),
-			CanReport:   false,
+			Description: fmt.Sprintf("Alien forces reinforced at %s", displayName),
+			Internal:    true,
 		})
 	}
 }
@@ -303,16 +304,16 @@ func (e *Engine) applyBotCommand(bc BotCommand) {
 
 	switch bc.Type {
 	case CmdMove:
-		fleet, ok := e.State.Fleets[bc.FleetID]
-		if !ok || fleet.InTransit || fleet.Owner != AlienOwner {
+		fleet := e.State.truth.Fleet(bc.FleetID)
+		if fleet == nil || fleet.InTransit || fleet.Owner != AlienOwner {
 			return
 		}
-		src, srcOK := e.State.Systems[fleet.LocationID]
-		dest, destOK := e.State.Systems[bc.DestID]
-		if !srcOK || !destOK {
+		src := e.State.truth.System(fleet.LocationID)
+		dest := e.State.truth.System(bc.DestID)
+		if src == nil || dest == nil {
 			return
 		}
-		travelYears := distBetween(src, dest) / FleetSpeedC
+		travelYears := e.State.Catalog.Distance(src.ID, dest.ID) / FleetSpeedC
 		fleet.InTransit = true
 		fleet.DepartYear = e.State.Clock
 		fleet.ArrivalYear = e.State.Clock + travelYears
@@ -325,40 +326,35 @@ func (e *Engine) applyBotCommand(bc BotCommand) {
 
 // logCommandFailed records a command_failed event for a command that could not execute.
 func (e *Engine) logCommandFailed(cmd *PendingCommand, err error) {
-	sys := e.State.Systems[cmd.TargetID]
-	var displayName, sysID string
-	var distFromSol float64
-	if sys != nil {
-		displayName = sys.DisplayName
-		sysID = sys.ID
-		distFromSol = sys.DistFromSol
-	} else {
-		displayName = cmd.TargetID
-		sysID = cmd.TargetID
+	displayName := cmd.TargetID
+	distFromSol := 0.0
+	if c := e.State.Catalog.Get(cmd.TargetID); c != nil {
+		displayName = c.DisplayName
+		distFromSol = c.DistFromSol
 	}
-	hasCommLaser := sys != nil && systemHasCommLaser(e.State, sys)
+	sys := e.State.truth.System(cmd.TargetID)
+	hasCommLaser := sys != nil && systemHasCommLaser(e.State.truth, sys)
 	arrYear := arrivalYearFor(e.State.Clock, distFromSol, hasCommLaser)
-	e.State.RecordEvent(&GameEvent{
+	e.State.Events.Record(&Event{
 		EventYear:   e.State.Clock,
 		ArrivalYear: arrYear,
-		SystemID:    sysID,
+		SystemID:    cmd.TargetID,
 		Type:        EventCommandFailed,
 		Description: fmt.Sprintf("Command %s at %s failed: %v", cmd.Type, displayName, err),
-		CanReport:   hasCommLaser,
 		Details:     &CommandFailedDetails{CommandType: cmd.Type, Reason: err.Error()},
 	})
 }
 
 // --- Force presence checks ---
 
-func humanForcesPresent(state *GameState, sys *StarSystem) bool {
+func humanForcesPresent(truth *Truth, sys *TrueSystem) bool {
 	for wt, n := range sys.LocalUnits {
 		if !WeaponDefs[wt].CommLaser && n > 0 {
 			return true
 		}
 	}
 	for _, fid := range sys.FleetIDs {
-		f := state.Fleets[fid]
+		f := truth.Fleets[fid]
 		if f == nil || f.InTransit || f.Owner != HumanOwner {
 			continue
 		}
@@ -369,9 +365,9 @@ func humanForcesPresent(state *GameState, sys *StarSystem) bool {
 	return false
 }
 
-func alienForcesPresent(state *GameState, sys *StarSystem) bool {
+func alienForcesPresent(truth *Truth, sys *TrueSystem) bool {
 	for _, fid := range sys.FleetIDs {
-		f := state.Fleets[fid]
+		f := truth.Fleets[fid]
 		if f == nil || f.InTransit || f.Owner != AlienOwner {
 			continue
 		}
@@ -384,12 +380,12 @@ func alienForcesPresent(state *GameState, sys *StarSystem) bool {
 
 // systemHasCommLaser reports whether a system has a comm laser available,
 // either as a local unit or in any stationed human fleet.
-func systemHasCommLaser(state *GameState, sys *StarSystem) bool {
+func systemHasCommLaser(truth *Truth, sys *TrueSystem) bool {
 	if sys.LocalUnits[WeaponCommLaser] > 0 {
 		return true
 	}
 	for _, fid := range sys.FleetIDs {
-		f := state.Fleets[fid]
+		f := truth.Fleets[fid]
 		if f == nil || f.InTransit || f.Owner != HumanOwner {
 			continue
 		}
@@ -400,7 +396,7 @@ func systemHasCommLaser(state *GameState, sys *StarSystem) bool {
 	return false
 }
 
-func fleetIsReporterOnly(fleet *Fleet) bool {
+func fleetIsReporterOnly(fleet *TrueFleet) bool {
 	for wt, n := range fleet.Units {
 		if wt != WeaponReporter && n > 0 {
 			return false

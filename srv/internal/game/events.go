@@ -8,7 +8,8 @@ import (
 	"sync"
 )
 
-// EventManager manages the SSE client registry and broadcasts matured events.
+// EventManager manages the SSE client registry and broadcasts events.
+// Maturation/apply logic lives in Propagator; EventManager is plumbing.
 type EventManager struct {
 	mu      sync.Mutex
 	clients map[string]chan []byte // key: client ID, value: buffered channel
@@ -41,32 +42,25 @@ func (m *EventManager) Unregister(clientID string) {
 	}
 }
 
-// BroadcastMatured sends all newly-matured events (arrivalYear ≤ state.Clock,
-// !Broadcast) and their system state updates to all registered clients.
-// Must be called with state.mu held (engine tick holds it). (FR-017)
-func (m *EventManager) BroadcastMatured(state *GameState) {
-	for _, evt := range state.Events {
-		if evt.Broadcast {
-			continue
-		}
-		if evt.ArrivalYear > state.Clock || evt.ArrivalYear >= math.MaxFloat64 {
-			continue
-		}
-		if evt.Type == EventCombatSilent || evt.Type == EventAlienSpawn {
-			evt.Broadcast = true // mark internal-only events as handled
-			continue
-		}
+// broadcastEvent emits a single matured event as an SSE "game_event" frame.
+// Called by Propagator.Propagate; caller holds state.mu.
+func (m *EventManager) broadcastEvent(evt *Event) {
+	payload := sseFrame("game_event", eventToMap(evt))
+	m.broadcastBytes(payload)
+}
 
-		payload := sseFrame("game_event", eventToMap(evt))
-		m.broadcastBytes(payload)
-		evt.Broadcast = true
-
-		// Also send updated known state for the event's system
-		if sys, ok := state.Systems[evt.SystemID]; ok {
-			sysPayload := sseFrame("system_update", systemToMap(state, sys))
-			m.broadcastBytes(sysPayload)
-		}
+// broadcastSystemUpdate emits an SSE "system_update" frame for the given
+// system, sourced from SolView (or Sol's ground truth for "sol"). Called
+// by Propagator.Propagate; caller holds state.mu.
+func (m *EventManager) broadcastSystemUpdate(state *GameState, sysID string) {
+	if sysID == "" {
+		return
 	}
+	if _, ok := state.SolView.Systems[sysID]; !ok && sysID != "sol" {
+		return
+	}
+	payload := sseFrame("system_update", systemToMap(state, sysID))
+	m.broadcastBytes(payload)
 }
 
 // BroadcastClockSync sends a clock synchronisation event to all registered clients.
@@ -141,8 +135,8 @@ func sseFrame(eventType string, data interface{}) []byte {
 	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(b)))
 }
 
-// eventToMap converts a GameEvent to a map suitable for JSON encoding.
-func eventToMap(evt *GameEvent) map[string]interface{} {
+// eventToMap converts an Event to a map suitable for JSON encoding.
+func eventToMap(evt *Event) map[string]interface{} {
 	m := map[string]interface{}{
 		"id":          evt.ID,
 		"arrivalYear": evt.ArrivalYear,
@@ -156,65 +150,112 @@ func eventToMap(evt *GameEvent) map[string]interface{} {
 	return m
 }
 
-// systemToMap converts a system's known-state fields to a map for JSON encoding.
-func systemToMap(state *GameState, sys *StarSystem) map[string]interface{} {
-	knownUnits := map[string]int{}
-	for wt, n := range sys.KnownLocalUnits {
-		if n > 0 {
-			knownUnits[string(wt)] = n
+// systemToMap returns the player-visible map for one system, sourced from
+// SolView (or, for sol, the single ReadSolGroundTruth() escape hatch).
+func systemToMap(state *GameState, sysID string) map[string]interface{} {
+	cat := state.Catalog.Get(sysID)
+	displayName := sysID
+	if cat != nil {
+		displayName = cat.DisplayName
+	}
+
+	if sysID == "sol" {
+		gt := state.ReadSolGroundTruth()
+		return map[string]interface{}{
+			"systemId":        sysID,
+			"displayName":     displayName,
+			"knownStatus":     string(gt.Status),
+			"knownAsOfYear":   state.Clock,
+			"knownEconLevel":  gt.EconLevel,
+			"knownWealth":     gt.Wealth,
+			"knownLocalUnits": unitsToStringMap(gt.LocalUnits),
+			"knownFleets":     buildKnownFleetsForSol(state, gt.FleetIDs),
 		}
 	}
-	wealth := sys.KnownWealth
-	if sys.ID == "sol" {
-		wealth = sys.Wealth // Sol: always ground truth (FR-023)
+
+	ks := state.SolView.System(sysID)
+	if ks == nil {
+		return map[string]interface{}{
+			"systemId":        sysID,
+			"displayName":     displayName,
+			"knownStatus":     string(StatusUnknown),
+			"knownLocalUnits": map[string]int{},
+			"knownFleets":     []map[string]interface{}{},
+		}
 	}
 	return map[string]interface{}{
-		"systemId":        sys.ID,
-		"knownStatus":     string(sys.KnownStatus),
-		"knownAsOfYear":   sys.KnownAsOfYear,
-		"knownEconLevel":  sys.KnownEconLevel,
-		"knownWealth":     wealth,
-		"knownLocalUnits": knownUnits,
-		"knownFleets":     buildKnownFleets(state, sys),
+		"systemId":        sysID,
+		"displayName":     displayName,
+		"knownStatus":     string(ks.Status),
+		"knownAsOfYear":   ks.AsOfYear,
+		"knownEconLevel":  ks.EconLevel,
+		"knownWealth":     ks.Wealth,
+		"knownLocalUnits": unitsToStringMap(ks.LocalUnits),
+		"knownFleets":     buildKnownFleetsForView(state, ks.FleetIDs),
 	}
 }
 
-// buildKnownFleets returns player-visible fleet objects for a system.
-// Sol uses ground-truth FleetIDs; all other systems use KnownFleetIDs.
-func buildKnownFleets(state *GameState, sys *StarSystem) []map[string]interface{} {
-	fleetIDs := sys.KnownFleetIDs
-	if sys.ID == "sol" {
-		fleetIDs = sys.FleetIDs
-	}
-	result := []map[string]interface{}{}
+// buildKnownFleetsForView returns the player-visible human-fleet map list
+// for a non-sol system, reading snapshots from SolView.Fleets.
+func buildKnownFleetsForView(state *GameState, fleetIDs []string) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(fleetIDs))
 	for _, fid := range fleetIDs {
-		f := state.Fleets[fid]
-		if f != nil && f.Owner == HumanOwner {
-			result = append(result, fleetToMap(f))
+		f := state.SolView.Fleet(fid)
+		if f == nil || f.Owner != HumanOwner {
+			continue
 		}
+		result = append(result, knownFleetToMap(f))
 	}
 	return result
 }
 
-// fleetToMap converts a Fleet to a map suitable for JSON encoding.
-func fleetToMap(f *Fleet) map[string]interface{} {
-	units := map[string]int{}
-	for wt, n := range f.Units {
-		if n > 0 {
-			units[string(wt)] = n
-		}
-	}
+// buildKnownFleetsForSol returns Sol's fleet list. Sol's fleets are mirrored
+// into SolView.Fleets at construction time (events at sol mature in the same
+// tick they are recorded), so we can read from SolView like any other system.
+func buildKnownFleetsForSol(state *GameState, fleetIDs []string) []map[string]interface{} {
+	return buildKnownFleetsForView(state, fleetIDs)
+}
+
+// knownFleetToMap converts a stationed KnownFleet to its SSE/DTO map.
+func knownFleetToMap(f *KnownFleet) map[string]interface{} {
 	return map[string]interface{}{
 		"id":            f.ID,
 		"name":          f.Name,
 		"owner":         string(f.Owner),
-		"units":         units,
-		"inTransit":     f.InTransit,
-		"sourceId":      f.SourceID,
-		"destinationId": f.DestID,
-		"departYear":    f.DepartYear,
-		"arrivalYear":   f.ArrivalYear,
+		"units":         unitsToStringMap(f.Units),
+		"inTransit":     false,
+		"sourceId":      "",
+		"destinationId": "",
+		"departYear":    0.0,
+		"arrivalYear":   0.0,
 	}
+}
+
+// transitToMap converts a KnownTransit (in-flight fleet known to Sol) to its
+// SSE/DTO map.
+func transitToMap(t *KnownTransit) map[string]interface{} {
+	return map[string]interface{}{
+		"id":            t.FleetID,
+		"name":          t.Name,
+		"owner":         string(t.Owner),
+		"units":         unitsToStringMap(t.Units),
+		"inTransit":     true,
+		"sourceId":      t.SourceID,
+		"destinationId": t.DestID,
+		"departYear":    t.DepartYear,
+		"arrivalYear":   t.ArrivalYear,
+	}
+}
+
+// unitsToStringMap returns a string-keyed map of positive unit counts.
+func unitsToStringMap(m map[WeaponType]int) map[string]int {
+	out := map[string]int{}
+	for wt, n := range m {
+		if n > 0 {
+			out[string(wt)] = n
+		}
+	}
+	return out
 }
 
 // pendingCommandToMap converts a PendingCommand to a map for JSON encoding,
@@ -231,11 +272,11 @@ func pendingCommandToMap(state *GameState, cmd *PendingCommand) map[string]inter
 }
 
 // describePendingCommandLocal formats hover text for an in-flight command.
-// Kept in the game package for the SSE path; mirrors the REST describePendingCommand.
+// Reads display names from Catalog and fleet names from SolView.
 func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
 	targetName := cmd.TargetID
-	if sys, ok := state.Systems[cmd.TargetID]; ok {
-		targetName = sys.DisplayName
+	if e := state.Catalog.Get(cmd.TargetID); e != nil {
+		targetName = e.DisplayName
 	}
 	switch cmd.Type {
 	case CmdConstruct:
@@ -243,12 +284,12 @@ func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
 			cmd.Quantity, cmd.WeaponType, targetName, cmd.ExecuteYear)
 	case CmdMove:
 		fleetName := cmd.FleetID
-		if f, ok := state.Fleets[cmd.FleetID]; ok {
+		if f := state.SolView.Fleet(cmd.FleetID); f != nil {
 			fleetName = f.Name
 		}
 		destName := cmd.DestID
-		if sys, ok := state.Systems[cmd.DestID]; ok {
-			destName = sys.DisplayName
+		if e := state.Catalog.Get(cmd.DestID); e != nil {
+			destName = e.DisplayName
 		}
 		return fmt.Sprintf("Order: Move %s to %s (arrives yr %.1f)",
 			fleetName, destName, cmd.ExecuteYear)
@@ -261,43 +302,31 @@ func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
 // fullStateMap builds the initial full-state snapshot for a newly connected client.
 // (handleEvents uses this for the "connected" SSE event.)
 func fullStateMap(state *GameState) map[string]interface{} {
-	systems := make([]map[string]interface{}, 0, len(state.Systems))
-	for _, id := range state.SystemOrder {
-		sys := state.Systems[id]
-		knownUnits := map[string]int{}
-		for wt, n := range sys.KnownLocalUnits {
-			if n > 0 {
-				knownUnits[string(wt)] = n
-			}
-		}
-		wealth := sys.KnownWealth
-		if sys.ID == "sol" {
-			wealth = sys.Wealth // Sol: always ground truth (FR-023)
-		}
-		systems = append(systems, map[string]interface{}{
-			"id":              sys.ID,
-			"displayName":     sys.DisplayName,
-			"x":               sys.X,
-			"y":               sys.Y,
-			"z":               sys.Z,
-			"distFromSol":     sys.DistFromSol,
-			"hasPlanets":      sys.HasPlanets,
-			"isSol":           sys.ID == "sol",
-			"knownStatus":     string(sys.KnownStatus),
-			"knownAsOfYear":   sys.KnownAsOfYear,
-			"knownEconLevel":  sys.KnownEconLevel,
-			"knownWealth":     wealth,
-			"knownLocalUnits": knownUnits,
-			"knownFleets":     buildKnownFleets(state, sys),
-		})
+	systems := make([]map[string]interface{}, 0, len(state.Catalog.Order))
+	for _, id := range state.Catalog.Order {
+		cat := state.Catalog.Get(id)
+		entry := systemToMap(state, id)
+		// Augment with static catalog fields used by the connected snapshot.
+		entry["displayName"] = cat.DisplayName
+		entry["x"] = cat.X
+		entry["y"] = cat.Y
+		entry["z"] = cat.Z
+		entry["distFromSol"] = cat.DistFromSol
+		entry["hasPlanets"] = cat.HasPlanets
+		entry["isSol"] = cat.IsSol
+		entry["id"] = id
+		systems = append(systems, entry)
 	}
 
 	events := make([]map[string]interface{}, 0)
-	for _, evt := range state.Events {
+	for _, evt := range state.Events.All {
 		if !evt.Broadcast {
 			continue
 		}
-		if evt.Type == EventCombatSilent || evt.Type == EventAlienSpawn {
+		if evt.Internal {
+			continue
+		}
+		if evt.ArrivalYear > state.Clock || evt.ArrivalYear >= math.MaxFloat64 {
 			continue
 		}
 		events = append(events, eventToMap(evt))
@@ -312,9 +341,9 @@ func fullStateMap(state *GameState) map[string]interface{} {
 	}
 
 	inTransit := make([]map[string]interface{}, 0)
-	for _, f := range state.Fleets {
-		if f.Owner == HumanOwner && f.InTransit {
-			inTransit = append(inTransit, fleetToMap(f))
+	for _, t := range state.SolView.InTransit {
+		if t.Owner == HumanOwner {
+			inTransit = append(inTransit, transitToMap(t))
 		}
 	}
 
@@ -329,12 +358,4 @@ func fullStateMap(state *GameState) map[string]interface{} {
 		"pendingCommands":      pendingCommands,
 		"humanFleetsInTransit": inTransit,
 	}
-}
-
-// BroadcastFleetDeparted sends a fleet_departed SSE event. Called by the engine
-// immediately after a human-owned move command begins transit.
-// Caller must hold state.mu.
-func (m *EventManager) BroadcastFleetDeparted(f *Fleet) {
-	payload := sseFrame("fleet_departed", fleetToMap(f))
-	m.broadcastBytes(payload)
 }
