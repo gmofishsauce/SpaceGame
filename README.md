@@ -1,10 +1,8 @@
 A limited information strategy game using science fiction tropes.
 The vision statement and requirements document have and have been moved to the OLD_SPECS directory.
 They are still useful for learning the general concept of the game,
-but the design has evolved.
+but the design has evolved. Where conflicts exist, the code is authoritative.
 See `./OLD_SPECS/VisionStatement.md` and `./OLD_SPECS/requirements.md`.
-
-At this point only the code is authoritative. The design specifications are not.
 
 Workflow going forward: whenever the frontend source changes, run scripts/build-frontend.sh and commit the
 updated web/dist/ alongside the source changes. Anyone cloning the repo can then just go build

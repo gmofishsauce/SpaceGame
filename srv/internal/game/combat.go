@@ -14,8 +14,9 @@ type combatUnit struct {
 }
 
 // Resolve resolves all combat in the given system for the current tick.
-// It mutates system forces, logs events, and updates system status. (FR-049–FR-054a)
-func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
+// It mutates ground-truth forces, logs events, and updates system status.
+// (FR-049–FR-054a)
+func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 	humanUnits := collectHumanUnits(state, sys)
 	alienUnits := collectAlienUnits(state, sys)
 
@@ -23,16 +24,22 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 		return
 	}
 
+	distFromSol := 0.0
+	displayName := sys.ID
+	if e := state.Catalog.Get(sys.ID); e != nil {
+		distFromSol = e.DistFromSol
+		displayName = e.DisplayName
+	}
+
 	// Step 1: Comm Laser reports alien arrival at c BEFORE any combat. (FR-053)
-	hasCommLaser := systemHasCommLaser(state, sys)
+	hasCommLaser := systemHasCommLaser(state.truth, sys)
 	if hasCommLaser {
-		state.RecordEvent(&GameEvent{
+		state.Events.Record(&Event{
 			EventYear:   state.Clock,
-			ArrivalYear: state.Clock + sys.DistFromSol,
+			ArrivalYear: state.Clock + distFromSol,
 			SystemID:    sys.ID,
 			Type:        EventFleetArrival,
-			Description: fmt.Sprintf("Alien forces detected at %s (comm laser)", sys.DisplayName),
-			CanReport:   true,
+			Description: fmt.Sprintf("Alien forces detected at %s (comm laser)", displayName),
 		})
 	}
 
@@ -70,8 +77,6 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 		}
 
 		// Remove casualties (end of round — parallel resolution).
-		// uniqueIndices returns indices sorted descending; iterating forward
-		// removes highest indices first, keeping lower indices valid.
 		for _, idx := range uniqueIndices(toDestroyAlien) {
 			alienLosses[alienUnits[idx].weaponType]++
 			state.Alien.TotalLost++
@@ -86,13 +91,12 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 	// Check alien exhaustion after losses.
 	if !state.Alien.Exhausted && state.Alien.TotalLost >= AlienExhaustionThreshold {
 		state.Alien.Exhausted = true
-		state.RecordEvent(&GameEvent{
+		state.Events.Record(&Event{
 			EventYear:   state.Clock,
 			ArrivalYear: state.Clock, // Sol knows immediately (global event)
 			SystemID:    "sol",
 			Type:        EventAlienExhausted,
 			Description: "Alien forces have been exhausted by cumulative losses.",
-			CanReport:   true,
 		})
 	}
 
@@ -111,14 +115,12 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 		sys.EconLevel = 0
 		clearHumanForces(state, sys)
 		if oldStatus == StatusHuman {
-			evtType := EventSystemCaptured
-			state.RecordEvent(&GameEvent{
+			state.Events.Record(&Event{
 				EventYear:   state.Clock,
-				ArrivalYear: reportArrivalYear(state.Clock, sys.DistFromSol, hasCommLaser, reportersFled),
+				ArrivalYear: reportArrivalYear(state.Clock, distFromSol, hasCommLaser, reportersFled),
 				SystemID:    sys.ID,
-				Type:        evtType,
-				Description: fmt.Sprintf("%s captured by alien forces", sys.DisplayName),
-				CanReport:   hasCommLaser || reportersFled,
+				Type:        EventSystemCaptured,
+				Description: fmt.Sprintf("%s captured by alien forces", displayName),
 			})
 		}
 	}
@@ -127,13 +129,12 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 		sys.Status = StatusHuman
 		clearAlienForces(state, sys)
 		if oldStatus == StatusAlien {
-			state.RecordEvent(&GameEvent{
+			state.Events.Record(&Event{
 				EventYear:   state.Clock,
-				ArrivalYear: reportArrivalYear(state.Clock, sys.DistFromSol, hasCommLaser, reportersFled),
+				ArrivalYear: reportArrivalYear(state.Clock, distFromSol, hasCommLaser, reportersFled),
 				SystemID:    sys.ID,
 				Type:        EventSystemRetaken,
-				Description: fmt.Sprintf("%s retaken by human forces", sys.DisplayName),
-				CanReport:   hasCommLaser || reportersFled,
+				Description: fmt.Sprintf("%s retaken by human forces", displayName),
 			})
 		}
 	}
@@ -143,22 +144,48 @@ func Resolve(rng *rand.Rand, state *GameState, sys *StarSystem) {
 
 	// Log internal combat event (always). (FR-052)
 	canReport := hasCommLaser || reportersFled
-	arrYear := reportArrivalYear(state.Clock, sys.DistFromSol, hasCommLaser, reportersFled)
+	arrYear := reportArrivalYear(state.Clock, distFromSol, hasCommLaser, reportersFled)
 
 	evtType := EventCombatOccurred
+	internal := false
 	if !canReport {
 		evtType = EventCombatSilent
 		arrYear = math.MaxFloat64
+		internal = true
 	}
 
 	desc := summarizeCombat(humanWon, alienWon, draw, humanLosses, alienLosses)
-	state.RecordEvent(&GameEvent{
+
+	// DEFERRED: reporter survival is not coupled to report delivery.
+	//
+	// Today, when combat occurs at a system without a comm laser, we spawn
+	// reporter fleets toward Sol AND record the combat Event with an
+	// ArrivalYear keyed to the reporter's ETA at 0.8c. The two are
+	// independent: the Event is delivered to SolView when its ArrivalYear
+	// matures, regardless of whether the reporter fleet still exists.
+	//
+	// This is currently safe ONLY because reporters cannot be destroyed in
+	// transit (no in-transit combat exists in the game). If that ever
+	// changes -- in-transit interception, alien patrols, escorts that
+	// engage passing fleets, or any other mechanism by which a fleet may
+	// die en route -- this becomes a real bug: the player will receive
+	// reports that should have been lost with their carrier.
+	//
+	// Fix when needed (review item E in architecturalreview.md):
+	//   - give TrueFleet a CarriedEvents []*Event field
+	//   - have combat attach the report to the spawned reporter fleet
+	//     instead of calling state.Events.Record() directly here
+	//   - in processFleetArrivals, Record() each carried event when the
+	//     fleet lands; on fleet destruction, drop them
+	// The propagation pipeline introduced by the dual-state refactor
+	// already supports this without further restructuring.
+	state.Events.Record(&Event{
 		EventYear:   state.Clock,
 		ArrivalYear: arrYear,
 		SystemID:    sys.ID,
 		Type:        evtType,
 		Description: desc,
-		CanReport:   canReport,
+		Internal:    internal,
 		Details: &CombatDetails{
 			HumanLosses: humanLosses,
 			AlienLosses: alienLosses,
@@ -188,7 +215,7 @@ func hitProbability(attackerType, targetType WeaponType) float64 {
 }
 
 // collectHumanUnits flattens all human forces in a system into a unit slice.
-func collectHumanUnits(state *GameState, sys *StarSystem) []combatUnit {
+func collectHumanUnits(state *GameState, sys *TrueSystem) []combatUnit {
 	var units []combatUnit
 	for wt, count := range sys.LocalUnits {
 		for i := 0; i < count; i++ {
@@ -196,7 +223,7 @@ func collectHumanUnits(state *GameState, sys *StarSystem) []combatUnit {
 		}
 	}
 	for _, fid := range sys.FleetIDs {
-		fleet := state.Fleets[fid]
+		fleet := state.truth.Fleets[fid]
 		if fleet == nil || fleet.Owner != HumanOwner || fleet.InTransit {
 			continue
 		}
@@ -210,10 +237,10 @@ func collectHumanUnits(state *GameState, sys *StarSystem) []combatUnit {
 }
 
 // collectAlienUnits flattens all alien forces in a system into a unit slice.
-func collectAlienUnits(state *GameState, sys *StarSystem) []combatUnit {
+func collectAlienUnits(state *GameState, sys *TrueSystem) []combatUnit {
 	var units []combatUnit
 	for _, fid := range sys.FleetIDs {
-		fleet := state.Fleets[fid]
+		fleet := state.truth.Fleets[fid]
 		if fleet == nil || fleet.Owner != AlienOwner || fleet.InTransit {
 			continue
 		}
@@ -229,16 +256,42 @@ func collectAlienUnits(state *GameState, sys *StarSystem) []combatUnit {
 // extractAndSendReporters removes all Reporter units from the system's human
 // fleets and creates in-transit reporter fleets toward Sol. Returns true if
 // any reporters fled. (FR-053)
-func extractAndSendReporters(state *GameState, sys *StarSystem, humanUnits *[]combatUnit) bool {
+//
+// DEFERRED: reporter survival is not coupled to report delivery.
+//
+// Today, when combat occurs at a system without a comm laser, we spawn
+// reporter fleets toward Sol AND record the combat Event with an
+// ArrivalYear keyed to the reporter's ETA at 0.8c. The two are
+// independent: the Event is delivered to SolView when its ArrivalYear
+// matures, regardless of whether the reporter fleet still exists.
+//
+// This is currently safe ONLY because reporters cannot be destroyed in
+// transit (no in-transit combat exists in the game). If that ever
+// changes -- in-transit interception, alien patrols, escorts that
+// engage passing fleets, or any other mechanism by which a fleet may
+// die en route -- this becomes a real bug: the player will receive
+// reports that should have been lost with their carrier.
+//
+// Fix when needed (review item E in architecturalreview.md):
+//   - give TrueFleet a CarriedEvents []*Event field
+//   - have combat attach the report to the spawned reporter fleet
+//     instead of calling state.Events.Record() directly here
+//   - in processFleetArrivals, Record() each carried event when the
+//     fleet lands; on fleet destruction, drop them
+// The propagation pipeline introduced by the dual-state refactor
+// already supports this without further restructuring.
+func extractAndSendReporters(state *GameState, sys *TrueSystem, humanUnits *[]combatUnit) bool {
 	reportersFled := false
-	sol := state.Systems["sol"]
-	if sol == nil {
+	if state.truth.System("sol") == nil {
 		return false
 	}
-	distToSol := sys.DistFromSol // DistFromSol is distance from Sol
+	distToSol := 0.0
+	if e := state.Catalog.Get(sys.ID); e != nil {
+		distToSol = e.DistFromSol
+	}
 
 	for _, fid := range sys.FleetIDs {
-		fleet := state.Fleets[fid]
+		fleet := state.truth.Fleets[fid]
 		if fleet == nil || fleet.Owner != HumanOwner || fleet.InTransit {
 			continue
 		}
@@ -265,7 +318,7 @@ func extractAndSendReporters(state *GameState, sys *StarSystem, humanUnits *[]co
 		reportFleetID := state.NewFleetID()
 		reportFleetName := state.NewFleetName()
 		travelYears := distToSol / FleetSpeedC
-		reportFleet := &Fleet{
+		reportFleet := &TrueFleet{
 			ID:          reportFleetID,
 			Name:        reportFleetName,
 			Owner:       HumanOwner,
@@ -276,27 +329,27 @@ func extractAndSendReporters(state *GameState, sys *StarSystem, humanUnits *[]co
 			ArrivalYear: state.Clock + travelYears,
 			InTransit:   true,
 		}
-		state.Fleets[reportFleetID] = reportFleet
+		state.truth.Fleets[reportFleetID] = reportFleet
 		reportersFled = true
 	}
 	return reportersFled
 }
 
 // clearHumanForces removes all human units and fleets from a system.
-func clearHumanForces(state *GameState, sys *StarSystem) {
+func clearHumanForces(state *GameState, sys *TrueSystem) {
 	for wt := range sys.LocalUnits {
 		sys.LocalUnits[wt] = 0
 	}
 	for _, fid := range sys.FleetIDs {
-		fleet := state.Fleets[fid]
+		fleet := state.truth.Fleets[fid]
 		if fleet != nil && fleet.Owner == HumanOwner {
-			delete(state.Fleets, fid)
+			delete(state.truth.Fleets, fid)
 		}
 	}
 	// Rebuild FleetIDs keeping only alien fleets
 	var remaining []string
 	for _, fid := range sys.FleetIDs {
-		if f := state.Fleets[fid]; f != nil && f.Owner == AlienOwner {
+		if f := state.truth.Fleets[fid]; f != nil && f.Owner == AlienOwner {
 			remaining = append(remaining, fid)
 		}
 	}
@@ -304,16 +357,16 @@ func clearHumanForces(state *GameState, sys *StarSystem) {
 }
 
 // clearAlienForces removes all alien fleets from a system.
-func clearAlienForces(state *GameState, sys *StarSystem) {
+func clearAlienForces(state *GameState, sys *TrueSystem) {
 	for _, fid := range sys.FleetIDs {
-		fleet := state.Fleets[fid]
+		fleet := state.truth.Fleets[fid]
 		if fleet != nil && fleet.Owner == AlienOwner {
-			delete(state.Fleets, fid)
+			delete(state.truth.Fleets, fid)
 		}
 	}
 	var remaining []string
 	for _, fid := range sys.FleetIDs {
-		if f := state.Fleets[fid]; f != nil && f.Owner == HumanOwner {
+		if f := state.truth.Fleets[fid]; f != nil && f.Owner == HumanOwner {
 			remaining = append(remaining, fid)
 		}
 	}
@@ -321,7 +374,7 @@ func clearAlienForces(state *GameState, sys *StarSystem) {
 }
 
 // reconcileForces writes surviving unit counts back to the system's authoritative state.
-func reconcileForces(state *GameState, sys *StarSystem, humanUnits, alienUnits []combatUnit) {
+func reconcileForces(state *GameState, sys *TrueSystem, humanUnits, alienUnits []combatUnit) {
 	// Rebuild local units for human side
 	newLocal := map[WeaponType]int{}
 	for _, u := range humanUnits {
@@ -331,10 +384,9 @@ func reconcileForces(state *GameState, sys *StarSystem, humanUnits, alienUnits [
 	}
 	sys.LocalUnits = newLocal
 
-	// Rebuild fleet units for human side (survivors go back into their fleets)
-	// Simple approach: distribute survivors proportionally. Since fleet composition
-	// changes during combat, consolidate all surviving mobile human units into
-	// the first human fleet still present (or create one).
+	// Rebuild fleet units for human side (survivors go back into their fleets).
+	// Simple approach: consolidate all surviving mobile human units into the
+	// first human fleet still present (or create one).
 	survivingMobileHuman := map[WeaponType]int{}
 	for _, u := range humanUnits {
 		if WeaponDefs[u.weaponType].CanMove {
@@ -344,22 +396,21 @@ func reconcileForces(state *GameState, sys *StarSystem, humanUnits, alienUnits [
 	if len(survivingMobileHuman) > 0 {
 		var humanFleetID string
 		for _, fid := range sys.FleetIDs {
-			if f := state.Fleets[fid]; f != nil && f.Owner == HumanOwner {
+			if f := state.truth.Fleets[fid]; f != nil && f.Owner == HumanOwner {
 				humanFleetID = fid
 				break
 			}
 		}
 		if humanFleetID == "" {
-			// All original fleets were destroyed; create a new consolidated fleet
 			fid := state.NewFleetID()
 			fname := state.NewFleetName()
-			state.Fleets[fid] = &Fleet{
+			state.truth.Fleets[fid] = &TrueFleet{
 				ID: fid, Name: fname, Owner: HumanOwner,
 				Units: survivingMobileHuman, LocationID: sys.ID,
 			}
 			sys.FleetIDs = append(sys.FleetIDs, fid)
 		} else {
-			state.Fleets[humanFleetID].Units = survivingMobileHuman
+			state.truth.Fleets[humanFleetID].Units = survivingMobileHuman
 		}
 	}
 
@@ -371,7 +422,7 @@ func reconcileForces(state *GameState, sys *StarSystem, humanUnits, alienUnits [
 	if len(survivingAlien) > 0 {
 		var alienFleetID string
 		for _, fid := range sys.FleetIDs {
-			if f := state.Fleets[fid]; f != nil && f.Owner == AlienOwner {
+			if f := state.truth.Fleets[fid]; f != nil && f.Owner == AlienOwner {
 				alienFleetID = fid
 				break
 			}
@@ -379,13 +430,13 @@ func reconcileForces(state *GameState, sys *StarSystem, humanUnits, alienUnits [
 		if alienFleetID == "" {
 			fid := state.NewFleetID()
 			fname := state.NewFleetName()
-			state.Fleets[fid] = &Fleet{
+			state.truth.Fleets[fid] = &TrueFleet{
 				ID: fid, Name: fname, Owner: AlienOwner,
 				Units: survivingAlien, LocationID: sys.ID,
 			}
 			sys.FleetIDs = append(sys.FleetIDs, fid)
 		} else {
-			state.Fleets[alienFleetID].Units = survivingAlien
+			state.truth.Fleets[alienFleetID].Units = survivingAlien
 		}
 	}
 }
@@ -403,7 +454,7 @@ func reportArrivalYear(clock, distFromSol float64, hasCommLaser, reportersFled b
 }
 
 // summarizeCombat generates a human-readable combat outcome description.
-func summarizeCombat(humanWon, alienWon, draw bool, humanLosses, alienLosses map[WeaponType]int) string {
+func summarizeCombat(humanWon, alienWon, _ bool, humanLosses, alienLosses map[WeaponType]int) string {
 	totalH := 0
 	for _, n := range humanLosses {
 		totalH += n

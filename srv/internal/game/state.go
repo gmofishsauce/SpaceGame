@@ -3,103 +3,53 @@ package game
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"sync"
 )
 
 // GameState is the in-memory authoritative game state. The engine is the
-// sole writer; HTTP handlers hold RLock for reads.
+// sole writer; HTTP handlers hold RLock for reads. The truth field is
+// unexported so packages outside game cannot reach ground truth (DR-1).
 type GameState struct {
 	mu sync.RWMutex // protects all fields below; excluded from JSON (json:"-")
 
-	Clock    float64
-	Paused   bool
-	GameOver bool
-	Winner   Owner  // "" if not over
+	Clock     float64
+	Paused    bool
+	GameOver  bool
+	Winner    Owner // "" if not over
 	WinReason string
 
-	Systems     map[string]*StarSystem // key: system ID (e.g. "gj-551")
-	SystemOrder []string               // insertion order: Sol first, then by distance
-	Fleets      map[string]*Fleet      // key: fleet ID
-	Events      []*GameEvent           // all events, chronological by EventYear
-	PendingCmds []*PendingCommand      // commands not yet arrived at target
+	Catalog *StarCatalog
+	truth   *Truth // unexported: only package game may dereference
+	SolView *SolView
+	Events  *EventLog
 
-	Human HumanFaction
-	Alien AlienFaction
+	Propagator *Propagator
+
+	Human       HumanFaction
+	Alien       AlienFaction
+	PendingCmds []*PendingCommand
+
+	rng *rand.Rand // injected (DR-11)
 
 	nextFleetNum int
-	nextEventID  int
 	nextCmdID    int
-}
-
-// StarSystem is one game entity (one or more co-located stars treated as one system).
-type StarSystem struct {
-	ID          string
-	DisplayName string
-	X, Y, Z     float64
-	DistFromSol float64
-	HasPlanets  bool
-
-	// Ground truth — only the engine writes these.
-	Status         SystemStatus
-	EconLevel      int     // 0 for uninhabited/alien-held; grows over time (FR-048)
-	Wealth         float64 // accumulated wealth; deducted by construction
-	EconGrowthYear float64 // game year at which next level-up occurs (reset on combat)
-	LocalUnits     map[WeaponType]int // stationary units (OrbitalDefense, Interceptor, CommLaser)
-	FleetIDs       []string           // IDs of fleets currently present
-	PrimaryFleetID string             // ID of this system's "1st Fleet" (receives new construction)
-	FleetCount     int               // number of fleets ever created here; drives ordinal naming
-
-	// Last known state — derived from reported events with arrivalYear ≤ currentClock.
-	KnownStatus     SystemStatus
-	KnownAsOfYear   float64
-	KnownEconLevel  int
-	KnownWealth     float64
-	KnownLocalUnits map[WeaponType]int
-	KnownFleetIDs   []string
-}
-
-// Fleet represents a named group of mobile units.
-type Fleet struct {
-	ID         string
-	Name       string
-	Owner      Owner
-	Units      map[WeaponType]int
-	LocationID string  // system ID if stationed; "" if in transit
-	SourceID   string  // origin system when in transit; "" otherwise
-	DestID     string  // "" if not in transit
-	DepartYear float64
-	ArrivalYear float64
-	InTransit  bool
-}
-
-// GameEvent is an occurrence recorded in the server-side event log.
-type GameEvent struct {
-	ID          string
-	EventYear   float64
-	ArrivalYear float64   // math.MaxFloat64 if event never reaches Earth (unreported)
-	SystemID    string
-	Type        EventType
-	Description string
-	Broadcast   bool      // true once pushed to SSE clients
-	CanReport   bool      // true if a reporting mechanism existed at event time
-	AppliedToKnown bool   // true once applied to system KnownState fields
-	Details     interface{} // type-specific payload (CombatDetails, etc.)
 }
 
 // PendingCommand is a player command in flight toward its target system.
 type PendingCommand struct {
-	ID          string
-	ExecuteYear float64
-	OriginID    string      // always "sol" for player commands
-	TargetID    string
-	Type        CommandType
-	WeaponType  WeaponType  // for CmdConstruct
-	Quantity    int         // for CmdConstruct
-	FleetID       string             // for CmdMove
-	DestID        string             // for CmdMove
-	SourceFleetID string             // for CmdReassign
-	TargetFleetID string             // for CmdReassign
-	ReassignUnits map[WeaponType]int // for CmdReassign
+	ID            string
+	ExecuteYear   float64
+	OriginID      string // always "sol" for player commands
+	TargetID      string
+	Type          CommandType
+	WeaponType    WeaponType // for CmdConstruct
+	Quantity      int        // for CmdConstruct
+	FleetID       string     // for CmdMove
+	DestID        string     // for CmdMove
+	SourceFleetID string     // for CmdReassign
+	TargetFleetID string     // for CmdReassign
+	ReassignUnits map[WeaponType]int
 	IsBot         bool
 }
 
@@ -110,10 +60,10 @@ type HumanFaction struct {
 
 // AlienFaction holds alien-side aggregate state.
 type AlienFaction struct {
-	TotalLost      int
-	Exhausted      bool
-	EntryPointIDs  []string
-	NextSpawnYear  float64
+	TotalLost     int
+	Exhausted     bool
+	EntryPointIDs []string
+	NextSpawnYear float64
 }
 
 // --- Lock helpers (for use by packages that cannot access the unexported mu) ---
@@ -122,6 +72,34 @@ func (s *GameState) Lock()    { s.mu.Lock() }
 func (s *GameState) Unlock()  { s.mu.Unlock() }
 func (s *GameState) RLock()   { s.mu.RLock() }
 func (s *GameState) RUnlock() { s.mu.RUnlock() }
+
+// Truth returns the omniscient ground-truth state. It is intended for use
+// by package game only (engine, combat, economy, bot). Code outside the
+// game package shall not call this method (DR-1 verification: a grep for
+// "state.Truth()" under srv/internal/server/ must return nothing).
+func (s *GameState) Truth() *Truth { return s.truth }
+
+// Rng returns the injected RNG. Use via state.Rng() so tests can inject a
+// deterministic seed (DR-11).
+func (s *GameState) Rng() *rand.Rand { return s.rng }
+
+// ReadSolGroundTruth is the single explicit affordance by which the HTTP
+// layer reads Sol's own state from Truth. The player sees Sol with no
+// light-speed delay; this preserves DR-1 in spirit by limiting access to
+// one grep-able accessor with a clear name.
+func (s *GameState) ReadSolGroundTruth() SolGroundTruthSnapshot {
+	sol := s.truth.Systems["sol"]
+	if sol == nil {
+		return SolGroundTruthSnapshot{}
+	}
+	return SolGroundTruthSnapshot{
+		Status:     sol.Status,
+		EconLevel:  sol.EconLevel,
+		Wealth:     sol.Wealth,
+		LocalUnits: copyUnits(sol.LocalUnits),
+		FleetIDs:   append([]string(nil), sol.FleetIDs...),
+	}
+}
 
 // --- ID generators (caller must hold mu.Lock) ---
 
@@ -150,12 +128,6 @@ func (s *GameState) NewFleetName() string {
 	return fmt.Sprintf("Fleet %s %d", fleetNames[idx%len(fleetNames)], gen+1)
 }
 
-// NewEventID returns the next unique event ID.
-func (s *GameState) NewEventID() string {
-	s.nextEventID++
-	return fmt.Sprintf("evt-%d", s.nextEventID)
-}
-
 // NewCommandID returns the next unique command ID.
 func (s *GameState) NewCommandID() string {
 	s.nextCmdID++
@@ -164,33 +136,32 @@ func (s *GameState) NewCommandID() string {
 
 // --- State mutation (caller must hold mu.Lock) ---
 
-// RecordEvent appends evt to the event log, assigning an ID if not set.
-func (s *GameState) RecordEvent(evt *GameEvent) {
-	if evt.ID == "" {
-		evt.ID = s.NewEventID()
-	}
-	s.Events = append(s.Events, evt)
-}
-
 // ApplyCommand executes a pending command against ground-truth state.
 // Returns an error if the command cannot be executed (insufficient wealth,
 // fleet not found, etc.). The caller logs the failure.
 func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
-	sys, ok := s.Systems[cmd.TargetID]
-	if !ok {
+	sys := s.truth.System(cmd.TargetID)
+	if sys == nil {
 		return fmt.Errorf("system %q not found", cmd.TargetID)
+	}
+	displayName := cmd.TargetID
+	if e := s.Catalog.Get(cmd.TargetID); e != nil {
+		displayName = e.DisplayName
 	}
 
 	// Log command arrival (FR-015)
-	hasCommLaser := systemHasCommLaser(s, sys)
-	arrivalArrYear := arrivalYearFor(s.Clock, sys.DistFromSol, hasCommLaser)
-	s.RecordEvent(&GameEvent{
+	hasCommLaser := systemHasCommLaser(s.truth, sys)
+	distFromSol := 0.0
+	if e := s.Catalog.Get(cmd.TargetID); e != nil {
+		distFromSol = e.DistFromSol
+	}
+	arrivalArrYear := arrivalYearFor(s.Clock, distFromSol, hasCommLaser)
+	s.Events.Record(&Event{
 		EventYear:   s.Clock,
 		ArrivalYear: arrivalArrYear,
 		SystemID:    cmd.TargetID,
 		Type:        EventCommandArrived,
-		Description: fmt.Sprintf("Command %s arrived at %s", cmd.Type, sys.DisplayName),
-		CanReport:   hasCommLaser,
+		Description: fmt.Sprintf("Command %s arrived at %s", cmd.Type, displayName),
 	})
 
 	switch cmd.Type {
@@ -201,8 +172,8 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 		ExecuteConstruct(s, sys, cmd.WeaponType, cmd.Quantity)
 
 	case CmdMove:
-		fleet, ok := s.Fleets[cmd.FleetID]
-		if !ok {
+		fleet := s.truth.Fleet(cmd.FleetID)
+		if fleet == nil {
 			return fmt.Errorf("fleet %q not found", cmd.FleetID)
 		}
 		if fleet.InTransit {
@@ -211,11 +182,11 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 		if fleet.LocationID != cmd.TargetID {
 			return fmt.Errorf("fleet %q is not at system %q", cmd.FleetID, cmd.TargetID)
 		}
-		dest, ok := s.Systems[cmd.DestID]
-		if !ok {
+		dest := s.truth.System(cmd.DestID)
+		if dest == nil {
 			return fmt.Errorf("destination system %q not found", cmd.DestID)
 		}
-		travelYears := distBetween(sys, dest) / FleetSpeedC
+		travelYears := s.Catalog.Distance(cmd.TargetID, cmd.DestID) / FleetSpeedC
 		fleet.InTransit = true
 		fleet.DepartYear = s.Clock
 		fleet.ArrivalYear = s.Clock + travelYears
@@ -224,6 +195,29 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 		// Remove from current system's fleet list
 		sys.FleetIDs = removeString(sys.FleetIDs, fleet.ID)
 		fleet.LocationID = ""
+
+		// Record EventFleetDeparted; reportable iff source has a comm laser.
+		// (Replaces the old synchronous BroadcastFleetDeparted path; DR-3.)
+		if fleet.Owner == HumanOwner {
+			depArrYear := arrivalYearFor(s.Clock, distFromSol, hasCommLaser)
+			s.Events.Record(&Event{
+				EventYear:   s.Clock,
+				ArrivalYear: depArrYear,
+				SystemID:    cmd.TargetID,
+				Type:        EventFleetDeparted,
+				Description: fmt.Sprintf("Fleet %s departed %s for %s", fleet.Name, displayName, cmd.DestID),
+				Details: &FleetDepartureDetails{
+					FleetID:     fleet.ID,
+					FleetName:   fleet.Name,
+					Owner:       fleet.Owner,
+					Units:       copyUnits(fleet.Units),
+					SourceID:    cmd.TargetID,
+					DestID:      cmd.DestID,
+					DepartYear:  fleet.DepartYear,
+					ArrivalYear: fleet.ArrivalYear,
+				},
+			})
+		}
 
 	case CmdCreateFleet:
 		if err := ExecuteCreateFleet(s, sys); err != nil {
@@ -240,104 +234,21 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 	}
 
 	// Log successful execution
-	execArrYear := arrivalYearFor(s.Clock, sys.DistFromSol, hasCommLaser)
-	s.RecordEvent(&GameEvent{
+	execArrYear := arrivalYearFor(s.Clock, distFromSol, hasCommLaser)
+	s.Events.Record(&Event{
 		EventYear:   s.Clock,
 		ArrivalYear: execArrYear,
 		SystemID:    cmd.TargetID,
 		Type:        EventCommandExecuted,
-		Description: fmt.Sprintf("Command %s executed at %s", cmd.Type, sys.DisplayName),
-		CanReport:   hasCommLaser,
+		Description: fmt.Sprintf("Command %s executed at %s", cmd.Type, displayName),
 	})
 	return nil
-}
-
-// UpdateKnownStates applies all newly matured events (arrivalYear ≤ clock,
-// !AppliedToKnown) to each system's KnownState fields. (FR-018)
-//
-// Events are stored in EventYear order, not ArrivalYear order, so we must
-// scan the full slice rather than stopping at the first unmatured entry.
-func (s *GameState) UpdateKnownStates(clock float64) {
-	for _, evt := range s.Events {
-		if evt.AppliedToKnown {
-			continue
-		}
-		if evt.ArrivalYear > clock || evt.ArrivalYear >= math.MaxFloat64 {
-			continue
-		}
-		if sys, ok := s.Systems[evt.SystemID]; ok {
-			applyEventToKnownState(sys, evt)
-		}
-		evt.AppliedToKnown = true
-	}
-}
-
-// applyEventToKnownState updates the system's known fields based on the event.
-func applyEventToKnownState(sys *StarSystem, evt *GameEvent) {
-	// Always advance the "known as of" year to the event's origin year.
-	if evt.EventYear > sys.KnownAsOfYear {
-		sys.KnownAsOfYear = evt.EventYear
-	}
-
-	switch evt.Type {
-	case EventCombatOccurred:
-		if d, ok := evt.Details.(*CombatDetails); ok {
-			if d.HumanWon {
-				sys.KnownStatus = StatusHuman
-			} else if d.AlienWon {
-				sys.KnownStatus = StatusAlien
-			} else if d.Draw {
-				sys.KnownStatus = StatusContested
-			}
-			// Apply known losses
-			for wt, n := range d.HumanLosses {
-				if sys.KnownLocalUnits != nil {
-					if sys.KnownLocalUnits[wt] >= n {
-						sys.KnownLocalUnits[wt] -= n
-					} else {
-						sys.KnownLocalUnits[wt] = 0
-					}
-				}
-			}
-		}
-
-	case EventSystemCaptured:
-		sys.KnownStatus = StatusAlien
-
-	case EventSystemRetaken:
-		sys.KnownStatus = StatusHuman
-
-	case EventSystemConquered:
-		sys.KnownStatus = StatusHuman
-		sys.KnownEconLevel = 0
-		sys.KnownWealth = 0
-
-	case EventConstructionDone:
-		if d, ok := evt.Details.(*ConstructionDetails); ok {
-			if sys.KnownLocalUnits == nil {
-				sys.KnownLocalUnits = map[WeaponType]int{}
-			}
-			if !WeaponDefs[d.WeaponType].CanMove {
-				sys.KnownLocalUnits[d.WeaponType] += d.Quantity
-			}
-		}
-
-	case EventEconGrowth:
-		if d, ok := evt.Details.(*EconGrowthDetails); ok {
-			sys.KnownEconLevel = d.NewLevel
-		}
-
-	case EventFleetArrival:
-		if d, ok := evt.Details.(*FleetArrivalDetails); ok && d.Owner == HumanOwner {
-			sys.KnownFleetIDs = appendIfMissing(sys.KnownFleetIDs, d.FleetID)
-		}
-	}
 }
 
 // CheckVictory evaluates win/loss conditions. Returns (true, winner, reason)
 // if the game is over, or (false, "", "") otherwise. (FR-056, FR-057)
 func (s *GameState) CheckVictory() (over bool, winner Owner, reason string) {
-	totalSystems := len(s.Systems)
+	totalSystems := len(s.truth.Systems)
 	if totalSystems == 0 {
 		return
 	}
@@ -345,7 +256,7 @@ func (s *GameState) CheckVictory() (over bool, winner Owner, reason string) {
 	// Count current system statuses
 	humanHeld := 0
 	alienHeld := 0
-	for _, sys := range s.Systems {
+	for _, sys := range s.truth.Systems {
 		switch sys.Status {
 		case StatusHuman:
 			humanHeld++
@@ -355,7 +266,7 @@ func (s *GameState) CheckVictory() (over bool, winner Owner, reason string) {
 	}
 
 	// FR-057: Alien wins if it captures Earth OR holds ≥ AlienWinCaptureFraction of all systems.
-	if sol, ok := s.Systems["sol"]; ok && sol.Status == StatusAlien {
+	if sol, ok := s.truth.Systems["sol"]; ok && sol.Status == StatusAlien {
 		return true, AlienOwner, "Earth has been captured by alien forces."
 	}
 	humanInitial := len(s.Human.InitialSystemIDs)
@@ -366,13 +277,13 @@ func (s *GameState) CheckVictory() (over bool, winner Owner, reason string) {
 	// FR-056: Human wins if alien exhausted AND Earth human-held AND
 	// fraction of originally human-held systems still human-held ≥ HumanWinRetentionFraction.
 	if s.Alien.Exhausted {
-		sol, solOK := s.Systems["sol"]
+		sol, solOK := s.truth.Systems["sol"]
 		if solOK && sol.Status == StatusHuman {
 			initialCount := len(s.Human.InitialSystemIDs)
 			if initialCount > 0 {
 				retained := 0
 				for _, id := range s.Human.InitialSystemIDs {
-					if sys, ok := s.Systems[id]; ok && sys.Status == StatusHuman {
+					if sys, ok := s.truth.Systems[id]; ok && sys.Status == StatusHuman {
 						retained++
 					}
 				}
@@ -397,14 +308,6 @@ func arrivalYearFor(clock, distFromSol float64, hasCommLaser bool) float64 {
 		return clock + distFromSol // at c
 	}
 	return math.MaxFloat64
-}
-
-// distBetween returns the Euclidean distance between two systems in light-years.
-func distBetween(a, b *StarSystem) float64 {
-	dx := a.X - b.X
-	dy := a.Y - b.Y
-	dz := a.Z - b.Z
-	return math.Sqrt(dx*dx + dy*dy + dz*dz)
 }
 
 // removeString removes the first occurrence of s from slice.

@@ -11,14 +11,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Initialize loads nearest.csv and planets.csv, builds and returns the initial
 // GameState. (FR-005 through FR-010)
-func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
+//
+// rng is injected (DR-11) so tests can seed deterministically. main.go passes
+// a time-seeded RNG to preserve current default behavior.
+func Initialize(rng *rand.Rand, nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 	hasPlanets, err := loadPlanets(planetsCSVPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading %s: %w", planetsCSVPath, err)
@@ -32,19 +32,11 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 		return nil, fmt.Errorf("nearest.csv: no usable star records")
 	}
 
-	state := &GameState{
-		Systems:     make(map[string]*StarSystem),
-		Fleets:      make(map[string]*Fleet),
-		Events:      []*GameEvent{},
-		PendingCmds: []*PendingCommand{},
-	}
-
-	// Build systems, determine initial status. Sol is always first (loader guarantees it).
+	// 1. Build the immutable star catalog.
+	entries := make([]*CatalogEntry, 0, len(groups))
 	for _, g := range groups {
 		id := toSystemID(g.DisplayName)
-		isSol := g.IsSol
-
-		sys := &StarSystem{
+		entries = append(entries, &CatalogEntry{
 			ID:          id,
 			DisplayName: g.DisplayName,
 			X:           g.X,
@@ -52,44 +44,67 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 			Z:           g.Z,
 			DistFromSol: g.DistFromSol,
 			HasPlanets:  g.HasPlanets,
-			LocalUnits:  make(map[WeaponType]int),
+			IsSol:       g.IsSol,
+		})
+	}
+	catalog := NewStarCatalog(entries)
+
+	// 2. Build ground truth and the initial player view.
+	truth := &Truth{
+		Systems: make(map[string]*TrueSystem, len(entries)),
+		Fleets:  map[string]*TrueFleet{},
+	}
+	view := &SolView{
+		Systems:   make(map[string]*KnownSystem, len(entries)),
+		Fleets:    map[string]*KnownFleet{},
+		InTransit: map[string]*KnownTransit{},
+	}
+
+	state := &GameState{
+		Catalog:     catalog,
+		truth:       truth,
+		SolView:     view,
+		Events:      NewEventLog(),
+		PendingCmds: []*PendingCommand{},
+		rng:         rng,
+	}
+
+	// 3. Populate Truth and seed SolView from initial Truth (G-4).
+	for _, g := range groups {
+		id := toSystemID(g.DisplayName)
+		isSol := g.IsSol
+
+		ts := &TrueSystem{
+			ID:         id,
+			LocalUnits: map[WeaponType]int{},
 		}
 
 		// Determine initial status (FR-006, FR-007)
 		if isSol {
-			sys.Status = StatusHuman
-			sys.EconLevel = 4
-			sys.Wealth = 64
-			sys.EconGrowthYear = EconGrowthIntervalYears // Sol already at max; won't grow
-			sys.LocalUnits[WeaponCommLaser] = 1
+			ts.Status = StatusHuman
+			ts.EconLevel = 4
+			ts.Wealth = 64
+			ts.EconGrowthYear = EconGrowthIntervalYears // Sol already at max; won't grow
+			ts.LocalUnits[WeaponCommLaser] = 1
 		} else if g.HasPlanets {
-			sys.Status = StatusHuman
-			sys.EconLevel = gaussianEconLevel(rng)
-			sys.EconGrowthYear = EconGrowthIntervalYears
+			ts.Status = StatusHuman
+			ts.EconLevel = gaussianEconLevel(rng)
+			ts.EconGrowthYear = EconGrowthIntervalYears
 		} else if g.DistFromSol <= maxDist/2.0 {
-			sys.Status = StatusHuman
-			sys.EconLevel = gaussianEconLevel(rng)
-			sys.EconGrowthYear = EconGrowthIntervalYears
+			ts.Status = StatusHuman
+			ts.EconLevel = gaussianEconLevel(rng)
+			ts.EconGrowthYear = EconGrowthIntervalYears
 		} else {
-			sys.Status = StatusUninhabited
-			sys.EconLevel = 0
+			ts.Status = StatusUninhabited
+			ts.EconLevel = 0
 		}
 
-		// Initial known state = initial ground truth (G-4 assumption)
-		sys.KnownStatus = sys.Status
-		sys.KnownEconLevel = sys.EconLevel
-		sys.KnownWealth = sys.Wealth
-		sys.KnownAsOfYear = 0.0
-		sys.KnownLocalUnits = copyUnits(sys.LocalUnits)
-		sys.KnownFleetIDs = []string{}
-
 		// Tuned for gameplay balance: every human-held system starts with two
-		// Reporter ships (dispatched with the first wave of colonists) so the
-		// human player has an intelligence capability from turn one.
-		if sys.Status == StatusHuman {
+		// Reporter ships and (if it has planets) a Comm Laser.
+		if ts.Status == StatusHuman {
 			fid := state.NewFleetID()
-			fname := sys.DisplayName + "-1st Fleet"
-			fleet := &Fleet{
+			fname := g.DisplayName + "-1st Fleet"
+			tf := &TrueFleet{
 				ID:         fid,
 				Name:       fname,
 				Owner:      HumanOwner,
@@ -97,37 +112,57 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 				LocationID: id,
 				InTransit:  false,
 			}
-			state.Fleets[fid] = fleet
-			sys.FleetIDs = append(sys.FleetIDs, fid)
-			sys.KnownFleetIDs = append(sys.KnownFleetIDs, fid)
-			sys.PrimaryFleetID = fid
-			sys.FleetCount = 1
+			truth.Fleets[fid] = tf
+			ts.FleetIDs = append(ts.FleetIDs, fid)
+			ts.PrimaryFleetID = fid
+			ts.FleetCount = 1
 
-			// Tuned for gameplay balance: every human-held system with planets
-			// starts with a Comm Laser (shipped with the colonists, so it exists
-			// regardless of the system's current economic level).
 			if g.HasPlanets {
-				sys.LocalUnits[WeaponCommLaser] = 1
-				sys.KnownLocalUnits[WeaponCommLaser] = 1
+				ts.LocalUnits[WeaponCommLaser] = 1
+			}
+
+			// Mirror the human fleet into SolView as a snapshot (DR-4).
+			view.Fleets[fid] = &KnownFleet{
+				ID:         fid,
+				Name:       fname,
+				Owner:      HumanOwner,
+				Units:      copyUnits(tf.Units),
+				LocationID: id,
+				AsOfYear:   0,
 			}
 		}
 
-		state.Systems[id] = sys
-		state.SystemOrder = append(state.SystemOrder, id)
+		truth.Systems[id] = ts
+
+		// Seed SolView from initial Truth (G-4): the player's pre-game view
+		// matches ground truth, EXCEPT alien presence will be added below
+		// without updating the view (FR-010).
+		ks := &KnownSystem{
+			ID:         id,
+			Status:     ts.Status,
+			AsOfYear:   0,
+			EconLevel:  ts.EconLevel,
+			Wealth:     ts.Wealth,
+			LocalUnits: copyUnits(ts.LocalUnits),
+			FleetIDs:   append([]string(nil), ts.FleetIDs...),
+		}
+		view.Systems[id] = ks
 	}
 
 	// Record initial human systems for win condition (FR-056)
-	for id, sys := range state.Systems {
+	for id, sys := range truth.Systems {
 		if sys.Status == StatusHuman {
 			state.Human.InitialSystemIDs = append(state.Human.InitialSystemIDs, id)
 		}
 	}
 
-	// Select alien entry points from peripheral systems (FR-009, A-2)
-	var peripheral []*StarSystem
-	for _, sys := range state.Systems {
-		if sys.DistFromSol > PeripheryFraction*maxDist {
-			peripheral = append(peripheral, sys)
+	// 4. Select alien entry points from peripheral systems (FR-009, A-2).
+	var peripheral []string
+	for id, sys := range truth.Systems {
+		_ = sys
+		e := catalog.Get(id)
+		if e != nil && e.DistFromSol > PeripheryFraction*maxDist {
+			peripheral = append(peripheral, id)
 		}
 	}
 	rng.Shuffle(len(peripheral), func(i, j int) { peripheral[i], peripheral[j] = peripheral[j], peripheral[i] })
@@ -139,28 +174,30 @@ func Initialize(nearestCSVPath, planetsCSVPath string) (*GameState, error) {
 	}
 
 	for i := 0; i < count; i++ {
-		ep := peripheral[i]
-		state.Alien.EntryPointIDs = append(state.Alien.EntryPointIDs, ep.ID)
+		epID := peripheral[i]
+		ts := truth.Systems[epID]
+		state.Alien.EntryPointIDs = append(state.Alien.EntryPointIDs, epID)
 
 		// Place initial alien fleet at entry point (G-1)
 		fleetID := state.NewFleetID()
 		fleetName := state.NewFleetName()
-		fleet := &Fleet{
+		tf := &TrueFleet{
 			ID:         fleetID,
 			Name:       fleetName,
 			Owner:      AlienOwner,
 			Units:      copyUnits(AlienInitialComposition),
-			LocationID: ep.ID,
+			LocationID: epID,
 			InTransit:  false,
 		}
-		state.Fleets[fleetID] = fleet
-		ep.FleetIDs = append(ep.FleetIDs, fleetID)
+		truth.Fleets[fleetID] = tf
+		ts.FleetIDs = append(ts.FleetIDs, fleetID)
 
-		// Ground truth: system is alien-held. Known state stays as uninhabited/human
-		// (FR-010: alien presence not visible at start).
-		ep.Status = StatusAlien
-		ep.EconLevel = 0
-		// KnownStatus intentionally NOT updated — player doesn't know about aliens yet.
+		// Ground truth: system is alien-held. SolView intentionally NOT updated
+		// — player doesn't know about aliens yet (FR-010). The SolView entry
+		// retains its pre-alien Status (StatusUninhabited or StatusHuman as
+		// determined above, before we overwrite ts.Status here).
+		ts.Status = StatusAlien
+		ts.EconLevel = 0
 	}
 
 	state.Alien.NextSpawnYear = AlienSpawnIntervalYears
