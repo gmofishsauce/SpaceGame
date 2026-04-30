@@ -1,0 +1,56 @@
+hi Claude. Here in /Users/jeff/go/src/github.com/gmofishsauce/SpaceGame
+there is a game, implemented as a  single page application, provided
+by a small server written in Golang. The server offers  APIs so it
+can act as the authoritative source of game information. The SPA
+is implemented entirely in JavaScript.
+
+The game is a slow moving model of interstellar warfare with speed
+of light delays playing a key role. The intent is that the players
+view of the entire star cluster (battle area) is based on the
+assumption of actions and state updates that are greatly delayed
+when viewed from Sol's frame of reference.  effect. The displayed
+state resulting from those actions may be corrected to reality later
+when new, lightspeed-delayed information arrives at Sol.
+
+Today's goal is the architectural review and discussion described below.
+
+Note that I said "players", plural. This is a two player game, but
+the design is currently asymmetrical: there is a human player who
+sees state derived from an API, and an omniscient, built-in bot
+that forms the opponent for the human player.
+
+I would like to investigate making the game symmetrical. There would
+still be a bot in the symmetrical game, but the bot would be forced
+to play against the same kind of light speed-delayed information seen by
+the human player. This would require many conceptual changes in
+addition to the major code change that is implied. The bot player
+would need its own home star playing the same role that Sol plays
+for the human. The bot player would also require a collection of
+stars near near the designated home star, each with their own economy--
+just like the human player has a set of star systems surrounding
+its home star at game start.
+
+For now please assume that the alien home star is 61 Ursae Majoris
+(61 UMa) and that this star has planets (in fact, none are known).
+Further assume the existence of CSV files similar to nearest.csv
+and planets.csv defining a collection of populated systems for the
+alien player. The contents of these files would be assembled as a
+task separate from the changes to the game itself.
+
+In this new design, the server will have to accept connections from
+up to two client programs. You may assume that the server will only
+accept local connections, so security is not an issue for now. The
+two local connections would be from a local browser for the human
+player and a newly designed stadnalone  bot that plays against the
+API interface. All places in the code that support the existing
+omniscient bot player would be cleaned up and removed.
+
+Currently, this is an investigation. Please prepare an overview
+document about this change for purposes of discussion only for now.
+The discussion will be used to refine the specifications and the
+plan. We will not write code directly from today's discussion, so
+there is no need for a design or requirements document at this time.
+Rather, the goal is to produce an improved specification document
+that replaces this long prompt. This improved specifications document
+would be consumed by a future run of the model to produce the detail
+design.
