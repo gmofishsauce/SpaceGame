@@ -19,29 +19,37 @@ func NewPropagator(em *EventManager) *Propagator {
 	return &Propagator{Events: em}
 }
 
-// Propagate pops every matured Event from state.Events, applies each to
-// state.SolView, marks it AppliedToView, and broadcasts each non-internal
-// event over SSE. Caller must hold state.mu (write lock).
+// Propagate pops every matured Event from each player's heap,
+// applies each to that player's view, and broadcasts non-internal events
+// over that player's SSE channel. Caller must hold state.mu (write lock).
+// (FR-14, FR-16, FR-18)
 func (p *Propagator) Propagate(state *GameState) {
-	for _, evt := range state.Events.PopMatured(state.Clock) {
-		p.applyEventToView(state.SolView, state.Catalog, evt)
-		evt.AppliedToView = true
-		if !evt.Internal {
-			p.Events.broadcastEvent(evt)
-			p.Events.broadcastSystemUpdate(state, evt.SystemID)
-			evt.Broadcast = true
+	for _, player := range []Owner{HumanOwner, AlienOwner} {
+		view := state.Views[player]
+		if view == nil {
+			continue
+		}
+		for _, evt := range state.Events.PopMatured(state.Clock, player) {
+			p.applyEventToView(view, state.Catalog, evt, player)
+			evt.AppliedToView[player] = true
+			if !evt.Internal {
+				p.Events.broadcastEvent(player, evt)
+				p.Events.broadcastSystemUpdate(player, state, evt.SystemID)
+				evt.Broadcast[player] = true
+			}
 		}
 	}
 }
 
-// applyEventToView is the heart of the propagation pipeline: it mutates
-// SolView based on a single matured Event. This is the ONLY function that
-// writes to SolView (the loader excepted; it seeds the initial view).
+// applyEventToView mutates a player's view based on a single matured Event.
+// player is the owner of view — used for perspective-sensitive cases such as
+// combat losses and conquest status. This is the only function that writes to
+// a PlayerView (the loader excepted).
 //
 // Each case is defensive: if a referenced KnownSystem is missing, a single
-// log line warns and the event is skipped. The propagator never panics --
+// log line warns and the event is skipped. The propagator never panics —
 // it must keep the engine alive.
-func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Event) {
+func (p *Propagator) applyEventToView(view *PlayerView, cat *StarCatalog, evt *Event, player Owner) {
 	if view == nil || evt == nil {
 		return
 	}
@@ -74,11 +82,19 @@ func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Even
 		} else if d.Draw {
 			sys.Status = StatusContested
 		}
-		// Apply non-mobile (local-unit) human losses.
+		// Apply losses for the viewing player's side. Events are routed to
+		// the precombat owner, so player == precombat owner == defender.
+		var myLosses map[WeaponType]int
+		if player == HumanOwner {
+			myLosses = d.HumanLosses
+		} else {
+			myLosses = d.AlienLosses
+		}
+		// Apply non-mobile (local-unit) losses.
 		if sys.LocalUnits == nil {
 			sys.LocalUnits = map[WeaponType]int{}
 		}
-		for wt, n := range d.HumanLosses {
+		for wt, n := range myLosses {
 			if WeaponDefs[wt].CanMove {
 				continue
 			}
@@ -88,9 +104,8 @@ func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Even
 				sys.LocalUnits[wt] = 0
 			}
 		}
-		// Apply mobile (fleet) human losses, distributed proportionally
-		// across this system's known fleets per weapon type.
-		applyMobileLossesToFleets(view, sys, d.HumanLosses)
+		// Apply mobile (fleet) losses across this system's known fleets.
+		applyMobileLossesToFleets(view, sys, myLosses)
 
 	case EventSystemCaptured:
 		sys.Status = StatusAlien
@@ -99,7 +114,7 @@ func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Even
 		sys.Status = StatusHuman
 
 	case EventSystemConquered:
-		sys.Status = StatusHuman
+		sys.Status = statusOf(player) // player is the conqueror (conquest events route to fleet owner)
 		sys.EconLevel = 0
 		sys.Wealth = 0
 
@@ -139,9 +154,7 @@ func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Even
 			LocationID: evt.SystemID,
 			AsOfYear:   evt.EventYear,
 		}
-		if d.Owner == HumanOwner {
-			sys.FleetIDs = appendIfMissing(sys.FleetIDs, d.FleetID)
-		}
+		sys.FleetIDs = appendIfMissing(sys.FleetIDs, d.FleetID)
 		delete(view.InTransit, d.FleetID)
 
 	case EventFleetDeparted:
@@ -185,10 +198,6 @@ func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Even
 	case EventReporterReturn:
 		// Decorative for the player; no SolView mutation.
 
-	case EventAlienExhausted:
-		// Global event; SolView is unaffected. CheckVictory reads
-		// state.Alien.Exhausted directly.
-
 	case EventGameOver:
 		// No SolView mutation; broadcast occurs through a separate path.
 
@@ -205,7 +214,7 @@ func (p *Propagator) applyEventToView(view *SolView, cat *StarCatalog, evt *Even
 // applyMobileConstructionToFleet applies a completed mobile-unit construction
 // to SolView. The truth-side ExecuteConstruct records the chosen FleetID on
 // ConstructionDetails so the propagator mirrors that exact decision. (DR-5)
-func applyMobileConstructionToFleet(view *SolView, sys *KnownSystem, d *ConstructionDetails, eventYear float64) {
+func applyMobileConstructionToFleet(view *PlayerView, sys *KnownSystem, d *ConstructionDetails, eventYear float64) {
 	if d.FleetID == "" {
 		// Defensive: a mobile construction event without a recorded fleet
 		// ID indicates a truth-side bug. Warn and skip rather than panic.
@@ -217,7 +226,7 @@ func applyMobileConstructionToFleet(view *SolView, sys *KnownSystem, d *Construc
 		f = &KnownFleet{
 			ID:         d.FleetID,
 			Name:       d.FleetName,
-			Owner:      HumanOwner,
+			Owner:      d.Owner,
 			Units:      map[WeaponType]int{},
 			LocationID: sys.ID,
 			AsOfYear:   eventYear,
@@ -238,7 +247,7 @@ func applyMobileConstructionToFleet(view *SolView, sys *KnownSystem, d *Construc
 // across the known fleets at sys, proportionally to each fleet's current
 // snapshot count for that weapon type. Fleets reduced to zero total units
 // are removed from view.Fleets and from sys.FleetIDs.
-func applyMobileLossesToFleets(view *SolView, sys *KnownSystem, humanLosses map[WeaponType]int) {
+func applyMobileLossesToFleets(view *PlayerView, sys *KnownSystem, humanLosses map[WeaponType]int) {
 	if len(humanLosses) == 0 || len(sys.FleetIDs) == 0 {
 		return
 	}

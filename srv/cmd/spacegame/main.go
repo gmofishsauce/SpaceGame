@@ -35,6 +35,8 @@ func main() {
 	// Resolve CSV paths relative to the working directory (project root).
 	nearestCSV := envOrDefault("SPACEGAME_NEAREST_CSV", "nearest.csv")
 	planetsCSV := envOrDefault("SPACEGAME_PLANETS_CSV", "planets.csv")
+	alienNearestCSV := envOrDefault("SPACEGAME_ALIEN_NEAREST_CSV", "alien-nearest.csv")
+	alienPlanetsCSV := envOrDefault("SPACEGAME_ALIEN_PLANETS_CSV", "alien-planets.csv")
 
 	if info, err := os.Stat(os.Args[0]); err == nil {
 		log.Printf("server v.%s started", info.ModTime().Format("20060102-150405"))
@@ -43,15 +45,14 @@ func main() {
 	}
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	state, err := game.Initialize(rng, nearestCSV, planetsCSV)
+	state, err := game.Initialize(rng, nearestCSV, planetsCSV, alienNearestCSV, alienPlanetsCSV)
 	if err != nil {
 		log.Fatalf("initializing game state: %v", err)
 	}
 	log.Printf("loaded %d star systems", len(state.Catalog.Order))
 
 	events := game.NewEventManager()
-	bot := game.NewDefaultBot()
-	engine := game.NewEngine(state, bot, events, rng)
+	engine := game.NewEngine(state, events, rng)
 
 	go engine.Run(ctx)
 

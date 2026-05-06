@@ -13,7 +13,7 @@ import (
 var clientSeq atomic.Int64
 
 // handleStars returns the static star positions for Three.js rendering. (FR-019)
-// Response is cached for 24 hours since positions never change.
+// No ?player required — star positions are public.
 func (s *Server) handleStars(w http.ResponseWriter, r *http.Request) {
 	s.state.RLock()
 	defer s.state.RUnlock()
@@ -42,22 +42,24 @@ func (s *Server) handleStars(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stars)
 }
 
-// handleState returns a full player-visible game state snapshot. (FR-004a)
-// Reads from SolView (and ReadSolGroundTruth for sol). Ground truth is not
-// otherwise exposed.
+// handleState returns a full player-visible game state snapshot. (FR-041)
+// Requires ?player. Returns the requesting player's view.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	player := playerOf(r)
+
 	s.state.RLock()
 	defer s.state.RUnlock()
 
 	cat := s.state.Catalog
 	systems := make([]SystemDTO, 0, len(cat.Order))
 	for _, id := range cat.Order {
-		systems = append(systems, buildSystemDTO(s.state, id))
+		systems = append(systems, buildSystemDTO(player, s.state, id))
 	}
 
 	events := make([]EventDTO, 0)
 	for _, evt := range s.state.Events.All {
-		if evt.ArrivalYear > s.state.Clock || evt.ArrivalYear >= math.MaxFloat64 {
+		arrival := evt.Arrival[player]
+		if arrival > s.state.Clock || arrival >= math.MaxFloat64 {
 			continue
 		}
 		if evt.Internal {
@@ -65,7 +67,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, EventDTO{
 			ID:          evt.ID,
-			ArrivalYear: evt.ArrivalYear,
+			ArrivalYear: arrival,
 			SystemID:    evt.SystemID,
 			Type:        string(evt.Type),
 			Description: evt.Description,
@@ -73,29 +75,30 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inTransit := make([]FleetDTO, 0)
-	for _, t := range s.state.SolView.InTransit {
-		if t.Owner == game.HumanOwner {
-			inTransit = append(inTransit, transitToDTO(t))
-		}
+	for _, t := range s.state.Views[player].InTransit {
+		inTransit = append(inTransit, transitToDTO(t))
 	}
 
 	resp := StateResponse{
-		GameYear:             s.state.Clock,
-		Paused:               s.state.Paused,
-		GameOver:             s.state.GameOver,
-		Winner:               string(s.state.Winner),
-		WinReason:            s.state.WinReason,
-		Systems:              systems,
-		Events:               events,
-		PendingCommands:      buildPendingCommandDTOs(s.state),
-		HumanFleetsInTransit: inTransit,
+		GameYear:        s.state.Clock,
+		Paused:          s.state.Paused,
+		GameOver:        s.state.GameOver,
+		Winner:          string(s.state.Winner),
+		WinReason:       s.state.WinReason,
+		Systems:         systems,
+		Events:          events,
+		PendingCommands: buildPendingCommandDTOs(player, s.state),
+		FleetsInTransit: inTransit,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleEvents streams SSE events to the client. (FR-017, FR-025)
+// handleEvents streams SSE events to the client. (FR-042, FR-46, FR-47)
+// Requires ?player. Registers the client under that player's channel set.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	player := playerOf(r)
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -107,14 +110,22 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	clientID := fmt.Sprintf("client-%d", clientSeq.Add(1))
-	ch := s.events.Register(clientID)
-	defer s.events.Unregister(clientID)
+	clientID := fmt.Sprintf("%s-client-%d", player, clientSeq.Add(1))
+	ch := s.events.Register(player, clientID)
+	defer func() {
+		_, wasLast := s.events.Unregister(clientID)
+		if wasLast {
+			s.engine.OnPlayerDisconnected(player)
+		}
+	}()
 
 	// Send the current full state as the initial "connected" event.
 	s.state.RLock()
-	s.events.BroadcastConnected(clientID, s.state)
+	s.events.BroadcastConnected(player, clientID, s.state)
 	s.state.RUnlock()
+
+	// Notify engine that this player is now connected.
+	s.engine.OnPlayerConnected(player)
 
 	for {
 		select {
@@ -132,12 +143,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleCommand processes a player command from the client. (FR-029, FR-031)
+// handleCommand processes a player command. (FR-024, FR-025, FR-27)
+// Requires ?player. Sets Issuer from the resolved player.
 func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	player := playerOf(r)
 
 	var req CommandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -150,11 +164,10 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Quantity == 0 && req.Type == game.CmdConstruct {
-		req.Quantity = 1 // default quantity for MVP
+		req.Quantity = 1
 	}
 
 	cmd := &game.PendingCommand{
-		OriginID:      "sol",
 		TargetID:      req.SystemID,
 		Type:          req.Type,
 		WeaponType:    req.WeaponType,
@@ -164,6 +177,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		SourceFleetID: req.SourceFleetID,
 		TargetFleetID: req.TargetFleetID,
 		ReassignUnits: convertUnits(req.Units),
+		Issuer:        player,
 	}
 
 	cmdID, arrivalYear, err := s.engine.EnqueueCommand(cmd)
@@ -181,14 +195,11 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		OriginID:    cmd.OriginID,
 		TargetID:    cmd.TargetID,
 		ExecuteYear: cmd.ExecuteYear,
-		Description: describePendingCommand(s.state, cmd),
+		Description: describePendingCommand(player, s.state, cmd),
 	}
 	var fleetName string
 	if cmd.Type == game.CmdCreateFleet {
-		// NextFleetName needs the truth-side TrueSystem to read FleetCount.
-		// This is the only command path that returns a server-projected
-		// fleet name (echoed back to the client for immediate display).
-		fleetName = nextFleetNamePreview(s.state, cmd.TargetID)
+		fleetName = nextFleetNamePreview(player, s.state, cmd.TargetID)
 	}
 	s.state.RUnlock()
 
@@ -202,8 +213,8 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDebugState returns the full authoritative event log with ground-truth
-// EventYear timestamps, including internal-only event types, for debugging.
+// handleDebugState returns the full authoritative event log for debugging.
+// No ?player required — this is a debug endpoint. (FR-44)
 func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 	s.state.RLock()
 	defer s.state.RUnlock()
@@ -214,7 +225,7 @@ func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 		events = append(events, DebugEventDTO{
 			ID:          evt.ID,
 			EventYear:   evt.EventYear,
-			ArrivalYear: evt.ArrivalYear,
+			ArrivalYear: evt.Arrival[game.HumanOwner],
 			SystemID:    evt.SystemID,
 			Type:        string(evt.Type),
 			Description: evt.Description,
@@ -229,10 +240,19 @@ func (s *Server) handleDebugState(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handlePause toggles pause state. (FR-013)
+// handlePause toggles pause state. (FR-013, FR-50)
+// Requires ?player. Only the human player may pause.
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	player := playerOf(r)
+	if player != game.HumanOwner {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(CommandResponse{OK: false, Error: "only the human player may pause"})
 		return
 	}
 
@@ -250,17 +270,16 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 
 // --- DTO builders ---
 
-// buildSystemDTO builds the player-visible DTO for a system from the catalog
-// (static fields) and SolView (or, for sol, ReadSolGroundTruth).
-func buildSystemDTO(state *game.GameState, sysID string) SystemDTO {
+// buildSystemDTO builds the player-visible DTO for a system. (FR-041)
+func buildSystemDTO(player game.Owner, state *game.GameState, sysID string) SystemDTO {
 	cat := state.Catalog.Get(sysID)
 	displayName := sysID
 	if cat != nil {
 		displayName = cat.DisplayName
 	}
 
-	if sysID == "sol" {
-		gt := state.ReadSolGroundTruth()
+	if sysID == state.Homes[player] {
+		gt := state.ReadHomeGroundTruth(player)
 		return SystemDTO{
 			ID:              sysID,
 			DisplayName:     displayName,
@@ -269,11 +288,11 @@ func buildSystemDTO(state *game.GameState, sysID string) SystemDTO {
 			KnownEconLevel:  gt.EconLevel,
 			KnownWealth:     gt.Wealth,
 			KnownLocalUnits: weaponMapToStringMap(gt.LocalUnits),
-			KnownFleets:     buildKnownFleetDTOs(state, gt.FleetIDs),
+			KnownFleets:     buildKnownFleetDTOs(player, state, gt.FleetIDs),
 		}
 	}
 
-	ks := state.SolView.System(sysID)
+	ks := state.Views[player].System(sysID)
 	if ks == nil {
 		return SystemDTO{
 			ID:              sysID,
@@ -291,17 +310,17 @@ func buildSystemDTO(state *game.GameState, sysID string) SystemDTO {
 		KnownEconLevel:  ks.EconLevel,
 		KnownWealth:     ks.Wealth,
 		KnownLocalUnits: weaponMapToStringMap(ks.LocalUnits),
-		KnownFleets:     buildKnownFleetDTOs(state, ks.FleetIDs),
+		KnownFleets:     buildKnownFleetDTOs(player, state, ks.FleetIDs),
 	}
 }
 
-// buildKnownFleetDTOs returns FleetDTOs for the human-owned fleets in the
-// given ID list, reading snapshots from SolView.Fleets.
-func buildKnownFleetDTOs(state *game.GameState, fleetIDs []string) []FleetDTO {
+// buildKnownFleetDTOs returns FleetDTOs for fleets in the given ID list,
+// reading snapshots from the player's view.
+func buildKnownFleetDTOs(player game.Owner, state *game.GameState, fleetIDs []string) []FleetDTO {
 	out := make([]FleetDTO, 0, len(fleetIDs))
 	for _, fid := range fleetIDs {
-		f := state.SolView.Fleet(fid)
-		if f == nil || f.Owner != game.HumanOwner {
+		f := state.Views[player].Fleet(fid)
+		if f == nil {
 			continue
 		}
 		out = append(out, knownFleetToDTO(f))
@@ -309,12 +328,11 @@ func buildKnownFleetDTOs(state *game.GameState, fleetIDs []string) []FleetDTO {
 	return out
 }
 
-// buildPendingCommandDTOs returns player-visible pending-command DTOs,
-// excluding bot commands.
-func buildPendingCommandDTOs(state *game.GameState) []PendingCommandDTO {
+// buildPendingCommandDTOs returns player-visible pending-command DTOs.
+func buildPendingCommandDTOs(player game.Owner, state *game.GameState) []PendingCommandDTO {
 	out := make([]PendingCommandDTO, 0, len(state.PendingCmds))
 	for _, cmd := range state.PendingCmds {
-		if cmd.IsBot {
+		if cmd.Issuer != player {
 			continue
 		}
 		out = append(out, PendingCommandDTO{
@@ -323,14 +341,14 @@ func buildPendingCommandDTOs(state *game.GameState) []PendingCommandDTO {
 			OriginID:    cmd.OriginID,
 			TargetID:    cmd.TargetID,
 			ExecuteYear: cmd.ExecuteYear,
-			Description: describePendingCommand(state, cmd),
+			Description: describePendingCommand(player, state, cmd),
 		})
 	}
 	return out
 }
 
 // describePendingCommand formats the hover-text description for an in-flight command.
-func describePendingCommand(state *game.GameState, cmd *game.PendingCommand) string {
+func describePendingCommand(player game.Owner, state *game.GameState, cmd *game.PendingCommand) string {
 	targetName := cmd.TargetID
 	if e := state.Catalog.Get(cmd.TargetID); e != nil {
 		targetName = e.DisplayName
@@ -341,7 +359,7 @@ func describePendingCommand(state *game.GameState, cmd *game.PendingCommand) str
 			cmd.Quantity, cmd.WeaponType, targetName, cmd.ExecuteYear)
 	case game.CmdMove:
 		fleetName := cmd.FleetID
-		if f := state.SolView.Fleet(cmd.FleetID); f != nil {
+		if f := state.Views[player].Fleet(cmd.FleetID); f != nil {
 			fleetName = f.Name
 		}
 		destName := cmd.DestID
@@ -354,11 +372,11 @@ func describePendingCommand(state *game.GameState, cmd *game.PendingCommand) str
 		return fmt.Sprintf("Create fleet at %s (executes yr %.1f)", targetName, cmd.ExecuteYear)
 	case game.CmdReassign:
 		srcName := cmd.SourceFleetID
-		if f := state.SolView.Fleet(cmd.SourceFleetID); f != nil {
+		if f := state.Views[player].Fleet(cmd.SourceFleetID); f != nil {
 			srcName = f.Name
 		}
 		dstName := cmd.TargetFleetID
-		if f := state.SolView.Fleet(cmd.TargetFleetID); f != nil {
+		if f := state.Views[player].Fleet(cmd.TargetFleetID); f != nil {
 			dstName = f.Name
 		}
 		return fmt.Sprintf("Reassign units from %s to %s at %s (executes yr %.1f)",
@@ -370,27 +388,23 @@ func describePendingCommand(state *game.GameState, cmd *game.PendingCommand) str
 }
 
 // nextFleetNamePreview returns the name that would be assigned to the next
-// fleet created at sysID. The server reads truth.FleetCount via SolView's
-// FleetIDs as a proxy: SolView reflects sol's known fleets in lockstep, and
-// for non-sol systems the player-issued CmdCreateFleet always targets a
-// human-known system. This avoids reaching into truth from the server.
-func nextFleetNamePreview(state *game.GameState, sysID string) string {
+// fleet created at sysID, using the player's view to read fleet count.
+func nextFleetNamePreview(player game.Owner, state *game.GameState, sysID string) string {
 	cat := state.Catalog.Get(sysID)
 	displayName := sysID
 	if cat != nil {
 		displayName = cat.DisplayName
 	}
 	count := 0
-	if sysID == "sol" {
-		count = len(state.ReadSolGroundTruth().FleetIDs)
-	} else if ks := state.SolView.System(sysID); ks != nil {
+	if sysID == state.Homes[player] {
+		count = len(state.ReadHomeGroundTruth(player).FleetIDs)
+	} else if ks := state.Views[player].System(sysID); ks != nil {
 		count = len(ks.FleetIDs)
 	}
 	return fmt.Sprintf("%s-%s Fleet", displayName, ordinalServer(count+1))
 }
 
-// ordinalServer mirrors game.ordinal but is package-local so handlers don't
-// need to dig into game internals for this one display helper.
+// ordinalServer mirrors game.ordinal but is package-local.
 func ordinalServer(n int) string {
 	if n >= 11 && n <= 13 {
 		return fmt.Sprintf("%dth", n)

@@ -46,7 +46,7 @@ func twoSystemSetup(t *testing.T, distLY float64) (*GameState, *Engine, *TrueSys
 		Fleets:  map[string]*TrueFleet{},
 	}
 
-	view := &SolView{
+	view := &PlayerView{
 		Systems: map[string]*KnownSystem{
 			"sol": {
 				ID:         "sol",
@@ -70,20 +70,20 @@ func twoSystemSetup(t *testing.T, distLY float64) (*GameState, *Engine, *TrueSys
 	st := &GameState{
 		Catalog:     cat,
 		truth:       truth,
-		SolView:     view,
+		Views:       map[Owner]*PlayerView{HumanOwner: view},
 		Events:      NewEventLog(),
 		PendingCmds: []*PendingCommand{},
 		rng:         rand.New(rand.NewSource(1)),
 	}
-	st.Human.InitialSystemIDs = []string{"sol", "remote"}
-	// Ensure alien spawning is a no-op: empty EntryPointIDs and a far-future
-	// NextSpawnYear (defensive belt-and-suspenders).
-	st.Alien.NextSpawnYear = 1e18
+	st.Factions = map[Owner]*Faction{
+		HumanOwner: {InitialSystemIDs: []string{"sol", "remote"}},
+		AlienOwner: {},
+	}
+	st.Homes = map[Owner]string{HumanOwner: "sol"}
 
 	events := NewEventManager()
-	bot := NewDefaultBot()
 	rng := rand.New(rand.NewSource(2))
-	engine := NewEngine(st, bot, events, rng)
+	engine := NewEngine(st, events, rng)
 	return st, engine, remote
 }
 
@@ -121,6 +121,7 @@ func TestIntegration_LightSpeedGating_Construct(t *testing.T) {
 		Type:       CmdConstruct,
 		WeaponType: WeaponOrbitalDefense,
 		Quantity:   1,
+		Issuer:     HumanOwner,
 	}
 	if _, _, err := e.EnqueueCommand(cmd); err != nil {
 		t.Fatalf("EnqueueCommand: %v", err)
@@ -128,7 +129,7 @@ func TestIntegration_LightSpeedGating_Construct(t *testing.T) {
 
 	// Advance to Clock=9 (< 10): command has not yet arrived at remote.
 	tickUntil(t, st, e, 9.0)
-	if got := st.SolView.Systems["remote"].LocalUnits[WeaponOrbitalDefense]; got != 0 {
+	if got := st.Views[HumanOwner].Systems["remote"].LocalUnits[WeaponOrbitalDefense]; got != 0 {
 		t.Errorf("at Clock=%.2f: SolView.LocalUnits[orbital_defense]=%d, want 0 "+
 			"(command has not yet arrived)", st.Clock, got)
 	}
@@ -141,7 +142,7 @@ func TestIntegration_LightSpeedGating_Construct(t *testing.T) {
 	// Advance to Clock=21 (> 20): command has arrived (Clock=10), executed,
 	// and the EventConstructionDone has matured at Sol (Clock=20).
 	tickUntil(t, st, e, 21.0)
-	if got := st.SolView.Systems["remote"].LocalUnits[WeaponOrbitalDefense]; got != 1 {
+	if got := st.Views[HumanOwner].Systems["remote"].LocalUnits[WeaponOrbitalDefense]; got != 1 {
 		t.Errorf("at Clock=%.2f: SolView.LocalUnits[orbital_defense]=%d, want 1 "+
 			"(report should have arrived)", st.Clock, got)
 	}
@@ -166,6 +167,7 @@ func TestIntegration_NoLiveAliasing(t *testing.T) {
 		Type:       CmdConstruct,
 		WeaponType: WeaponBattleship,
 		Quantity:   1,
+		Issuer:     HumanOwner,
 	}
 	if _, _, err := e.EnqueueCommand(cmd); err != nil {
 		t.Fatalf("EnqueueCommand: %v", err)
@@ -185,7 +187,7 @@ func TestIntegration_NoLiveAliasing(t *testing.T) {
 	if primaryID == "" {
 		t.Fatal("expected a truth-side human fleet at remote with a battleship; found none")
 	}
-	kf := st.SolView.Fleet(primaryID)
+	kf := st.Views[HumanOwner].Fleet(primaryID)
 	if kf == nil {
 		t.Fatalf("expected SolView.Fleets[%q] populated by report; got nil", primaryID)
 	}
@@ -227,15 +229,15 @@ func TestIntegration_DepartureGating(t *testing.T) {
 	}
 	st.truth.Fleets[tf.ID] = tf
 	remote.FleetIDs = append(remote.FleetIDs, tf.ID)
-	st.SolView.Fleets[tf.ID] = &KnownFleet{
+	st.Views[HumanOwner].Fleets[tf.ID] = &KnownFleet{
 		ID:         tf.ID,
 		Name:       tf.Name,
 		Owner:      HumanOwner,
 		Units:      copyUnits(tf.Units),
 		LocationID: "remote",
 	}
-	st.SolView.Systems["remote"].FleetIDs = append(
-		st.SolView.Systems["remote"].FleetIDs, tf.ID)
+	st.Views[HumanOwner].Systems["remote"].FleetIDs = append(
+		st.Views[HumanOwner].Systems["remote"].FleetIDs, tf.ID)
 
 	// Issue a move command from remote to sol.
 	cmd := &PendingCommand{
@@ -243,6 +245,7 @@ func TestIntegration_DepartureGating(t *testing.T) {
 		Type:     CmdMove,
 		FleetID:  tf.ID,
 		DestID:   "sol",
+		Issuer:   HumanOwner,
 	}
 	if _, _, err := e.EnqueueCommand(cmd); err != nil {
 		t.Fatalf("EnqueueCommand: %v", err)
@@ -258,12 +261,12 @@ func TestIntegration_DepartureGating(t *testing.T) {
 	if !tf.InTransit {
 		t.Errorf("at Clock=%.2f: truth fleet should be in transit", st.Clock)
 	}
-	if len(st.SolView.InTransit) != 0 {
+	if len(st.Views[HumanOwner].InTransit) != 0 {
 		t.Errorf("at Clock=%.2f: SolView.InTransit=%v, want empty (report not yet matured)",
-			st.Clock, st.SolView.InTransit)
+			st.Clock, st.Views[HumanOwner].InTransit)
 	}
 	// SolView still shows the fleet stationed at remote.
-	if st.SolView.Fleet(tf.ID) == nil {
+	if st.Views[HumanOwner].Fleet(tf.ID) == nil {
 		t.Errorf("at Clock=%.2f: SolView.Fleets[%q] missing; should still appear stationed",
 			st.Clock, tf.ID)
 	}
@@ -272,16 +275,16 @@ func TestIntegration_DepartureGating(t *testing.T) {
 	// Note: the truth-side fleet arrives at Sol at DepartYear + dist/FleetSpeedC
 	// = 10 + 10/0.8 = 22.5; we stop at 21 to observe the in-transit state.
 	tickUntil(t, st, e, 21.0)
-	if _, ok := st.SolView.InTransit[tf.ID]; !ok {
+	if _, ok := st.Views[HumanOwner].InTransit[tf.ID]; !ok {
 		t.Errorf("at Clock=%.2f: expected SolView.InTransit[%q] after departure event matured",
 			st.Clock, tf.ID)
 	}
-	if st.SolView.Fleet(tf.ID) != nil {
+	if st.Views[HumanOwner].Fleet(tf.ID) != nil {
 		t.Errorf("at Clock=%.2f: SolView.Fleets[%q] should be removed once the fleet is in transit",
 			st.Clock, tf.ID)
 	}
 	// Source system's KnownSystem.FleetIDs should no longer list it.
-	for _, id := range st.SolView.Systems["remote"].FleetIDs {
+	for _, id := range st.Views[HumanOwner].Systems["remote"].FleetIDs {
 		if id == tf.ID {
 			t.Errorf("at Clock=%.2f: KnownSystem.FleetIDs still contains %q", st.Clock, tf.ID)
 		}

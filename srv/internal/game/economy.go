@@ -5,21 +5,22 @@ import (
 	"math/rand"
 )
 
-// AccumulateWealth adds wealth to each human-held system proportional to
-// deltaYears at that system's econ rate. (FR-046)
+// AccumulateWealth adds wealth to each player-held system proportional to
+// deltaYears at that system's econ rate. (FR-046, G-3)
 func AccumulateWealth(state *GameState, deltaYears float64) {
 	for _, sys := range state.truth.Systems {
-		if sys.Status == StatusHuman && sys.EconLevel >= 0 && sys.EconLevel <= 5 {
+		if (sys.Status == StatusHuman || sys.Status == StatusAlien) && sys.EconLevel >= 0 && sys.EconLevel <= 5 {
 			sys.Wealth += EconWealthRate[sys.EconLevel] * deltaYears
 		}
 	}
 }
 
 // AdvanceEconLevels checks and applies economic level growth for each system.
-// Called on every engine tick. (FR-048)
+// Called on every engine tick. (FR-048, G-3)
 func AdvanceEconLevels(state *GameState) {
 	for id, sys := range state.truth.Systems {
-		if sys.Status != StatusHuman {
+		owner := statusToOwner(sys.Status)
+		if owner == "" {
 			continue
 		}
 		if sys.EconLevel < 5 && state.Clock >= sys.EconGrowthYear {
@@ -28,21 +29,17 @@ func AdvanceEconLevels(state *GameState) {
 
 			hasCommLaser := systemHasCommLaser(state.truth, sys)
 			if hasCommLaser {
-				distFromSol := 0.0
 				displayName := id
 				if e := state.Catalog.Get(id); e != nil {
-					distFromSol = e.DistFromSol
 					displayName = e.DisplayName
 				}
-				arrYear := arrivalYearFor(state.Clock, distFromSol, true)
-				state.Events.Record(&Event{
+				state.RecordEvent(&Event{
 					EventYear:   state.Clock,
-					ArrivalYear: arrYear,
 					SystemID:    id,
 					Type:        EventEconGrowth,
 					Description: fmt.Sprintf("%s economy grew to level %d", displayName, sys.EconLevel),
 					Details:     &EconGrowthDetails{NewLevel: sys.EconLevel},
-				})
+				}, owner, true, false)
 			}
 		}
 	}
@@ -60,8 +57,8 @@ func ApplyEconomicCombatPenalty(rng *rand.Rand, state *GameState, sys *TrueSyste
 }
 
 // ValidateConstruct checks whether a construction command can execute.
-// Returns nil if valid, error describing the rejection reason if not. (FR-047)
-func ValidateConstruct(sys *TrueSystem, wt WeaponType, qty int) error {
+// Returns nil if valid, error describing the rejection reason if not. (FR-047, FR-27)
+func ValidateConstruct(sys *TrueSystem, wt WeaponType, qty int, issuer Owner) error {
 	def, ok := WeaponDefs[wt]
 	if !ok {
 		return fmt.Errorf("unknown weapon type %q", wt)
@@ -69,8 +66,8 @@ func ValidateConstruct(sys *TrueSystem, wt WeaponType, qty int) error {
 	if qty <= 0 {
 		return fmt.Errorf("quantity must be positive, got %d", qty)
 	}
-	if sys.Status != StatusHuman {
-		return fmt.Errorf("system %q is not human-held", sys.ID)
+	if statusToOwner(sys.Status) != issuer {
+		return fmt.Errorf("system %q is not held by %s", sys.ID, issuer)
 	}
 	totalCost := def.Cost * float64(qty)
 	if sys.Wealth < totalCost {
@@ -85,16 +82,14 @@ func ValidateConstruct(sys *TrueSystem, wt WeaponType, qty int) error {
 // For mobile weapons, ConstructionDetails.FleetID and .FleetName are
 // populated with the truth-side fleet that received the units (whether the
 // existing primary or freshly minted) so the propagator can mirror the
-// decision into SolView (DR-5).
-func ExecuteConstruct(state *GameState, sys *TrueSystem, wt WeaponType, qty int) {
+// decision into PlayerView (DR-5).
+func ExecuteConstruct(state *GameState, sys *TrueSystem, wt WeaponType, qty int, issuer Owner) {
 	def := WeaponDefs[wt] // panics on invalid type by design
 	sys.Wealth -= def.Cost * float64(qty)
 
 	displayName := sys.ID
-	distFromSol := 0.0
 	if e := state.Catalog.Get(sys.ID); e != nil {
 		displayName = e.DisplayName
-		distFromSol = e.DistFromSol
 	}
 
 	var receivedByFleetID, receivedByFleetName string
@@ -113,7 +108,7 @@ func ExecuteConstruct(state *GameState, sys *TrueSystem, wt WeaponType, qty int)
 			tf := &TrueFleet{
 				ID:         fleetID,
 				Name:       fleetName,
-				Owner:      HumanOwner,
+				Owner:      issuer,
 				Units:      map[WeaponType]int{wt: qty},
 				LocationID: sys.ID,
 				InTransit:  false,
@@ -130,10 +125,8 @@ func ExecuteConstruct(state *GameState, sys *TrueSystem, wt WeaponType, qty int)
 
 	// Log construction complete event; reportable only if system has a comm laser.
 	hasCommLaser := systemHasCommLaser(state.truth, sys)
-	arrYear := arrivalYearFor(state.Clock, distFromSol, hasCommLaser)
-	state.Events.Record(&Event{
+	state.RecordEvent(&Event{
 		EventYear:   state.Clock,
-		ArrivalYear: arrYear,
 		SystemID:    sys.ID,
 		Type:        EventConstructionDone,
 		Description: fmt.Sprintf("Constructed %d %s at %s", qty, wt, displayName),
@@ -142,8 +135,9 @@ func ExecuteConstruct(state *GameState, sys *TrueSystem, wt WeaponType, qty int)
 			Quantity:   qty,
 			FleetID:    receivedByFleetID,
 			FleetName:  receivedByFleetName,
+			Owner:      issuer,
 		},
-	})
+	}, issuer, hasCommLaser, false)
 }
 
 // ordinal returns the English ordinal string for n (1→"1st", 2→"2nd", etc.).
@@ -174,9 +168,9 @@ func NextFleetName(state *GameState, sys *TrueSystem) string {
 }
 
 // ExecuteCreateFleet creates a new empty named fleet at sys.
-func ExecuteCreateFleet(state *GameState, sys *TrueSystem) error {
-	if sys.Status != StatusHuman {
-		return fmt.Errorf("system %q is not human-held", sys.ID)
+func ExecuteCreateFleet(state *GameState, sys *TrueSystem, issuer Owner) error {
+	if statusToOwner(sys.Status) != issuer {
+		return fmt.Errorf("system %q is not held by %s", sys.ID, issuer)
 	}
 	displayName := sys.ID
 	if e := state.Catalog.Get(sys.ID); e != nil {
@@ -187,7 +181,7 @@ func ExecuteCreateFleet(state *GameState, sys *TrueSystem) error {
 	tf := &TrueFleet{
 		ID:         fleetID,
 		Name:       fmt.Sprintf("%s-%s Fleet", displayName, ordinal(sys.FleetCount)),
-		Owner:      HumanOwner,
+		Owner:      issuer,
 		Units:      map[WeaponType]int{},
 		LocationID: sys.ID,
 		InTransit:  false,

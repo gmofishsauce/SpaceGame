@@ -5,29 +5,33 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 )
 
 // Engine runs the authoritative game loop and coordinates all subsystems.
 type Engine struct {
 	State  *GameState
-	Bot    BotAgent
 	Events *EventManager
 
-	tickCount int
-	rng       *rand.Rand
+	tickCount       int
+	rng             *rand.Rand
+	connectedMu     sync.Mutex
+	connectedCounts map[Owner]int // SSE connections per player
 }
 
-// NewEngine creates an Engine wired to the given state, bot, and event manager.
+// NewEngine creates an Engine wired to the given state and event manager.
 // rng is injected (DR-11) so tests can seed deterministically. The Propagator
-// is constructed here and stored on state.
-func NewEngine(state *GameState, bot BotAgent, events *EventManager, rng *rand.Rand) *Engine {
+// is constructed here and stored on state. The game starts paused until both
+// players connect. (FR-45, FR-46)
+func NewEngine(state *GameState, events *EventManager, rng *rand.Rand) *Engine {
 	state.Propagator = NewPropagator(events)
+	state.Paused = true // wait for both players (FR-45)
 	return &Engine{
-		State:  state,
-		Bot:    bot,
-		Events: events,
-		rng:    rng,
+		State:           state,
+		Events:          events,
+		rng:             rng,
+		connectedCounts: map[Owner]int{HumanOwner: 0, AlienOwner: 0},
 	}
 }
 
@@ -36,8 +40,6 @@ func NewEngine(state *GameState, bot BotAgent, events *EventManager, rng *rand.R
 func (e *Engine) Run(ctx context.Context) {
 	ticker := time.NewTicker(TickIntervalMs * time.Millisecond)
 	defer ticker.Stop()
-
-	e.Bot.Initialize(e.State)
 
 	for {
 		select {
@@ -64,8 +66,52 @@ func (e *Engine) SetPaused(paused bool) {
 	e.State.RUnlock()
 }
 
+// OnPlayerConnected is called by the SSE handler when a player's client
+// connects. Auto-unpauses when both players have at least one connection.
+// (FR-46)
+func (e *Engine) OnPlayerConnected(player Owner) {
+	e.connectedMu.Lock()
+	e.connectedCounts[player]++
+	both := e.connectedCounts[HumanOwner] > 0 && e.connectedCounts[AlienOwner] > 0
+	e.connectedMu.Unlock()
+
+	if both {
+		e.State.Lock()
+		if e.State.Paused && !e.State.GameOver {
+			e.State.Paused = false
+			log.Printf("engine: both players connected; game unpaused")
+		}
+		e.State.Unlock()
+		e.State.RLock()
+		e.Events.BroadcastClockSync(e.State)
+		e.State.RUnlock()
+	}
+}
+
+// OnPlayerDisconnected is called by the SSE handler when a player's last
+// client disconnects. Pauses the game and logs. (FR-47, NFR-13)
+func (e *Engine) OnPlayerDisconnected(player Owner) {
+	e.connectedMu.Lock()
+	if e.connectedCounts[player] > 0 {
+		e.connectedCounts[player]--
+	}
+	wasLast := e.connectedCounts[player] == 0
+	e.connectedMu.Unlock()
+
+	if wasLast {
+		e.State.Lock()
+		e.State.Paused = true
+		e.State.Unlock()
+		log.Printf("server: %s disconnected; game paused", player)
+		e.State.RLock()
+		e.Events.BroadcastClockSync(e.State)
+		e.State.RUnlock()
+	}
+}
+
 // EnqueueCommand validates and enqueues a player command. Returns the command
 // ID and estimated arrival year, or an error. Safe to call from HTTP handlers.
+// (FR-25, FR-26, FR-27)
 func (e *Engine) EnqueueCommand(cmd *PendingCommand) (string, float64, error) {
 	e.State.Lock()
 	defer e.State.Unlock()
@@ -75,24 +121,25 @@ func (e *Engine) EnqueueCommand(cmd *PendingCommand) (string, float64, error) {
 		return "", 0, fmt.Errorf("unknown system %q", cmd.TargetID)
 	}
 
-	// Quick known-state validation against SolView (full validation happens
-	// at execution time against Truth).
-	if cmd.TargetID != "sol" {
-		if ks := e.State.SolView.System(cmd.TargetID); ks != nil && ks.Status == StatusAlien {
-			return "", 0, fmt.Errorf("system %q is known to be alien-held; cannot issue commands", cmd.TargetID)
+	homeID := e.State.Homes[cmd.Issuer]
+
+	// Quick pre-check against the issuer's known view; full validation at execution.
+	if cmd.TargetID != homeID {
+		if ks := e.State.Views[cmd.Issuer].System(cmd.TargetID); ks != nil && statusToOwner(ks.Status) == OpposingOwner(cmd.Issuer) {
+			return "", 0, fmt.Errorf("system %q is known to be opponent-held; cannot issue commands", cmd.TargetID)
 		}
 	}
 
 	var executeYear float64
-	if cmd.TargetID == "sol" {
-		executeYear = e.State.Clock // immediate for Sol
+	if cmd.TargetID == homeID {
+		executeYear = e.State.Clock
 	} else {
-		executeYear = e.State.Clock + e.State.Catalog.Distance("sol", cmd.TargetID)/CommandSpeedC
+		executeYear = e.State.Clock + e.State.Catalog.Distance(homeID, cmd.TargetID)/CommandSpeedC
 	}
 
 	cmd.ID = e.State.NewCommandID()
 	cmd.ExecuteYear = executeYear
-	cmd.OriginID = "sol"
+	cmd.OriginID = homeID
 	e.State.PendingCmds = append(e.State.PendingCmds, cmd)
 
 	return cmd.ID, executeYear, nil
@@ -137,27 +184,7 @@ func (e *Engine) tick() {
 		}
 	}
 
-	// Alien spawning.
-	if !e.State.Alien.Exhausted && e.State.Clock >= e.State.Alien.NextSpawnYear {
-		e.spawnAlienForces()
-		e.State.Alien.NextSpawnYear += AlienSpawnIntervalYears
-	}
-
-	// Bot tick every BotTickCadence ticks.
 	e.tickCount++
-	if e.tickCount%BotTickCadence == 0 {
-		cmds := func() (result []BotCommand) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("engine: bot panic: %v", r)
-				}
-			}()
-			return e.Bot.Tick(e.State, e.State.Clock)
-		}()
-		for _, bc := range cmds {
-			e.applyBotCommand(bc)
-		}
-	}
 
 	// Propagate matured events: apply to SolView and broadcast SSE.
 	// Replaces the old UpdateKnownStates + BroadcastMatured pair.
@@ -191,16 +218,17 @@ func (e *Engine) processFleetArrivals() {
 			continue
 		}
 
-		// Reporter fleets arriving at Sol are consumed (their event was already logged).
-		if fleet.DestID == "sol" && fleet.Owner == HumanOwner && fleetIsReporterOnly(fleet) {
+		// Reporter fleets arriving at their owner's home are consumed (their
+		// event was already logged at combat time). (FR-23)
+		homeID := e.State.Homes[fleet.Owner]
+		if fleet.DestID == homeID && fleetIsReporterOnly(fleet) {
 			delete(e.State.truth.Fleets, fleet.ID)
-			e.State.Events.Record(&Event{
+			e.State.RecordEvent(&Event{
 				EventYear:   fleet.ArrivalYear,
-				ArrivalYear: fleet.ArrivalYear,
-				SystemID:    "sol",
+				SystemID:    homeID,
 				Type:        EventReporterReturn,
-				Description: fmt.Sprintf("Reporter fleet %s returned to Sol with intelligence", fleet.Name),
-			})
+				Description: fmt.Sprintf("Reporter fleet %s returned home with intelligence", fleet.Name),
+			}, fleet.Owner, true, false)
 			continue
 		}
 
@@ -214,16 +242,12 @@ func (e *Engine) processFleetArrivals() {
 
 		// Determine if this arrival is reportable (comm laser at destination)
 		hasCommLaser := systemHasCommLaser(e.State.truth, dest)
-		distFromSol := 0.0
 		displayName := dest.ID
 		if c := e.State.Catalog.Get(dest.ID); c != nil {
-			distFromSol = c.DistFromSol
 			displayName = c.DisplayName
 		}
-		arrYear := arrivalYearFor(e.State.Clock, distFromSol, hasCommLaser)
-		e.State.Events.Record(&Event{
+		e.State.RecordEvent(&Event{
 			EventYear:   e.State.Clock,
-			ArrivalYear: arrYear,
 			SystemID:    dest.ID,
 			Type:        EventFleetArrival,
 			Description: fmt.Sprintf("Fleet %s arrived at %s", fleet.Name, displayName),
@@ -233,116 +257,42 @@ func (e *Engine) processFleetArrivals() {
 				Owner:     fleet.Owner,
 				Units:     copyUnits(fleet.Units),
 			},
-		})
+		}, fleet.Owner, hasCommLaser, false)
 
-		// Conquest: a human fleet carrying a comm laser that arrives at an
-		// uninhabited system claims it. Economy starts at level 0, wealth 0.
-		if fleet.Owner == HumanOwner &&
-			dest.Status == StatusUninhabited &&
-			fleet.Units[WeaponCommLaser] > 0 {
-
-			dest.Status = StatusHuman
+		// Conquest: a fleet carrying a comm laser that arrives at an
+		// uninhabited system claims it for its owner. Economy starts at
+		// level 0, wealth 0.
+		if dest.Status == StatusUninhabited && fleet.Units[WeaponCommLaser] > 0 {
+			dest.Status = statusOf(fleet.Owner)
 			dest.EconLevel = 0
 			dest.Wealth = 0
 			dest.EconGrowthYear = e.State.Clock + EconGrowthIntervalYears
 
-			e.State.Events.Record(&Event{
+			e.State.RecordEvent(&Event{
 				EventYear:   e.State.Clock,
-				ArrivalYear: arrivalYearFor(e.State.Clock, distFromSol, true),
 				SystemID:    dest.ID,
 				Type:        EventSystemConquered,
 				Description: fmt.Sprintf("Fleet %s established a colony at %s", fleet.Name, displayName),
-			})
+			}, fleet.Owner, true, false)
 		}
-	}
-}
-
-// spawnAlienForces adds a wave of alien forces at each entry point.
-func (e *Engine) spawnAlienForces() {
-	for _, epID := range e.State.Alien.EntryPointIDs {
-		ep := e.State.truth.System(epID)
-		if ep == nil {
-			continue
-		}
-		fleetID := e.State.NewFleetID()
-		fleetName := e.State.NewFleetName()
-		fleet := &TrueFleet{
-			ID:         fleetID,
-			Name:       fleetName,
-			Owner:      AlienOwner,
-			Units:      copyUnits(AlienSpawnComposition),
-			LocationID: epID,
-			InTransit:  false,
-		}
-		e.State.truth.Fleets[fleetID] = fleet
-		ep.FleetIDs = append(ep.FleetIDs, fleetID)
-		ep.Status = StatusAlien
-
-		displayName := epID
-		if c := e.State.Catalog.Get(epID); c != nil {
-			displayName = c.DisplayName
-		}
-		e.State.Events.Record(&Event{
-			EventYear:   e.State.Clock,
-			ArrivalYear: e.State.Clock, // does not matter; Internal=true
-			SystemID:    epID,
-			Type:        EventAlienSpawn,
-			Description: fmt.Sprintf("Alien forces reinforced at %s", displayName),
-			Internal:    true,
-		})
-	}
-}
-
-// applyBotCommand applies a bot command immediately (no travel delay).
-// Bot fleet moves are direct state mutations. Called with state.mu held.
-func (e *Engine) applyBotCommand(bc BotCommand) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("engine: applyBotCommand panic: %v", r)
-		}
-	}()
-
-	switch bc.Type {
-	case CmdMove:
-		fleet := e.State.truth.Fleet(bc.FleetID)
-		if fleet == nil || fleet.InTransit || fleet.Owner != AlienOwner {
-			return
-		}
-		src := e.State.truth.System(fleet.LocationID)
-		dest := e.State.truth.System(bc.DestID)
-		if src == nil || dest == nil {
-			return
-		}
-		travelYears := e.State.Catalog.Distance(src.ID, dest.ID) / FleetSpeedC
-		fleet.InTransit = true
-		fleet.DepartYear = e.State.Clock
-		fleet.ArrivalYear = e.State.Clock + travelYears
-		fleet.DestID = bc.DestID
-		fleet.SourceID = src.ID
-		src.FleetIDs = removeString(src.FleetIDs, fleet.ID)
-		fleet.LocationID = ""
 	}
 }
 
 // logCommandFailed records a command_failed event for a command that could not execute.
 func (e *Engine) logCommandFailed(cmd *PendingCommand, err error) {
 	displayName := cmd.TargetID
-	distFromSol := 0.0
 	if c := e.State.Catalog.Get(cmd.TargetID); c != nil {
 		displayName = c.DisplayName
-		distFromSol = c.DistFromSol
 	}
 	sys := e.State.truth.System(cmd.TargetID)
 	hasCommLaser := sys != nil && systemHasCommLaser(e.State.truth, sys)
-	arrYear := arrivalYearFor(e.State.Clock, distFromSol, hasCommLaser)
-	e.State.Events.Record(&Event{
+	e.State.RecordEvent(&Event{
 		EventYear:   e.State.Clock,
-		ArrivalYear: arrYear,
 		SystemID:    cmd.TargetID,
 		Type:        EventCommandFailed,
 		Description: fmt.Sprintf("Command %s at %s failed: %v", cmd.Type, displayName, err),
 		Details:     &CommandFailedDetails{CommandType: cmd.Type, Reason: err.Error()},
-	})
+	}, cmd.Issuer, hasCommLaser, false)
 }
 
 // --- Force presence checks ---
@@ -379,14 +329,14 @@ func alienForcesPresent(truth *Truth, sys *TrueSystem) bool {
 }
 
 // systemHasCommLaser reports whether a system has a comm laser available,
-// either as a local unit or in any stationed human fleet.
+// either as a local unit or in any stationed fleet (any owner).
 func systemHasCommLaser(truth *Truth, sys *TrueSystem) bool {
 	if sys.LocalUnits[WeaponCommLaser] > 0 {
 		return true
 	}
 	for _, fid := range sys.FleetIDs {
 		f := truth.Fleets[fid]
-		if f == nil || f.InTransit || f.Owner != HumanOwner {
+		if f == nil || f.InTransit {
 			continue
 		}
 		if f.Units[WeaponCommLaser] > 0 {
@@ -394,6 +344,15 @@ func systemHasCommLaser(truth *Truth, sys *TrueSystem) bool {
 		}
 	}
 	return false
+}
+
+// totalUnits sums all unit counts in a fleet.
+func totalUnits(units map[WeaponType]int) int {
+	total := 0
+	for _, n := range units {
+		total += n
+	}
+	return total
 }
 
 func fleetIsReporterOnly(fleet *TrueFleet) bool {

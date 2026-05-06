@@ -21,13 +21,18 @@ type GameState struct {
 
 	Catalog *StarCatalog
 	truth   *Truth // unexported: only package game may dereference
-	SolView *SolView
-	Events  *EventLog
+	// Views replaces SolView. One PlayerView per Owner. (FR-12)
+	Views  map[Owner]*PlayerView
+	Events *EventLog
 
 	Propagator *Propagator
 
-	Human       HumanFaction
-	Alien       AlienFaction
+	// Factions and Homes replace the asymmetric Human/Alien fields. (FR-8)
+	// Both maps are keyed by Owner (HumanOwner / AlienOwner). Homes is
+	// populated at load time (AS-2): "sol" for HumanOwner; the alien home
+	// ID will be added in M6 when the alien CSVs are loaded.
+	Factions    map[Owner]*Faction
+	Homes       map[Owner]string
 	PendingCmds []*PendingCommand
 
 	rng *rand.Rand // injected (DR-11)
@@ -40,7 +45,8 @@ type GameState struct {
 type PendingCommand struct {
 	ID            string
 	ExecuteYear   float64
-	OriginID      string // always "sol" for player commands
+	OriginID      string // = state.Homes[Issuer] for player commands
+	Issuer        Owner  // which player issued this command (FR-25, FR-27)
 	TargetID      string
 	Type          CommandType
 	WeaponType    WeaponType // for CmdConstruct
@@ -50,20 +56,89 @@ type PendingCommand struct {
 	SourceFleetID string     // for CmdReassign
 	TargetFleetID string     // for CmdReassign
 	ReassignUnits map[WeaponType]int
-	IsBot         bool
 }
 
-// HumanFaction holds human-side aggregate state.
-type HumanFaction struct {
-	InitialSystemIDs []string // systems held at game start (for win condition)
+// Faction holds per-player state. Used twice — once for human, once for
+// alien — keyed by Owner in GameState.Factions. (FR-8)
+type Faction struct {
+	InitialSystemIDs []string // systems held by this side at t=0 (FR-55)
 }
 
-// AlienFaction holds alien-side aggregate state.
-type AlienFaction struct {
-	TotalLost     int
-	Exhausted     bool
-	EntryPointIDs []string
-	NextSpawnYear float64
+// DrawWinner is the sentinel Owner value used to encode a draw in
+// GameState.Winner and on the wire (FR-60). It is not a real owner.
+const DrawWinner Owner = "draw"
+
+// OpposingOwner returns the other player. (FR-54, FR-55)
+func OpposingOwner(p Owner) Owner {
+	if p == HumanOwner {
+		return AlienOwner
+	}
+	return HumanOwner
+}
+
+// HomeIDOf returns the home system ID for the given player. The map is
+// populated at load time (AS-2); a missing entry yields "" so callers
+// dereferencing into Truth get a nil and short-circuit safely.
+func (s *GameState) HomeIDOf(p Owner) string { return s.Homes[p] }
+
+// statusToOwner converts a SystemStatus to the corresponding Owner, or
+// "" for non-owned statuses (uninhabited / contested / unknown).
+func statusToOwner(st SystemStatus) Owner {
+	switch st {
+	case StatusHuman:
+		return HumanOwner
+	case StatusAlien:
+		return AlienOwner
+	default:
+		return ""
+	}
+}
+
+// statusOf returns the SystemStatus that corresponds to owner.
+func statusOf(owner Owner) SystemStatus {
+	switch owner {
+	case HumanOwner:
+		return StatusHuman
+	case AlienOwner:
+		return StatusAlien
+	default:
+		return StatusUninhabited
+	}
+}
+
+// RecordEvent computes per-player arrival times for an event originating
+// at e.SystemID at time e.EventYear, with the given report path
+// (comm laser → 1.0c, reporter-fled → 0.8c, neither → unreportable),
+// then records the event. Reports route to the reportTo player only;
+// the other player's arrival is set to math.MaxFloat64. (FR-13, FR-20,
+// FR-21, design §6.4)
+//
+// reportTo == "" means the event is unreportable to either side
+// (e.g. EventCombatSilent). Internal events should set Internal=true on
+// the event before calling — Record() will skip the heap push regardless
+// of arrival times.
+//
+// Caller must hold state.mu (write lock).
+func (s *GameState) RecordEvent(e *Event, reportTo Owner, hasCommLaser bool, reporterFled bool) {
+	arrivals := map[Owner]float64{
+		HumanOwner: math.MaxFloat64,
+		AlienOwner: math.MaxFloat64,
+	}
+	if reportTo != "" {
+		homeID := s.Homes[reportTo]
+		var d float64
+		if homeID != "" {
+			d = s.Catalog.Distance(e.SystemID, homeID)
+		}
+		switch {
+		case hasCommLaser:
+			arrivals[reportTo] = e.EventYear + d // 1.0c (FR-20)
+		case reporterFled:
+			arrivals[reportTo] = e.EventYear + d/FleetSpeedC // 0.8c (FR-20)
+		}
+	}
+	e.Arrival = arrivals
+	s.Events.Record(e)
 }
 
 // --- Lock helpers (for use by packages that cannot access the unexported mu) ---
@@ -83,21 +158,46 @@ func (s *GameState) Truth() *Truth { return s.truth }
 // deterministic seed (DR-11).
 func (s *GameState) Rng() *rand.Rand { return s.rng }
 
-// ReadSolGroundTruth is the single explicit affordance by which the HTTP
-// layer reads Sol's own state from Truth. The player sees Sol with no
-// light-speed delay; this preserves DR-1 in spirit by limiting access to
-// one grep-able accessor with a clear name.
-func (s *GameState) ReadSolGroundTruth() SolGroundTruthSnapshot {
-	sol := s.truth.Systems["sol"]
-	if sol == nil {
-		return SolGroundTruthSnapshot{}
+// NewGameStateForTest constructs a GameState for use in server-level tests
+// that live outside the game package. The caller supplies fully-populated
+// truth, human view, and alien view; the constructor wires them into the
+// unexported truth field and registers both player views. It also attaches a
+// Propagator, EventLog, and empty Factions/Homes/PendingCmds.
+func NewGameStateForTest(cat *StarCatalog, truth *Truth, humanView, alienView *PlayerView, rng *rand.Rand) *GameState {
+	em := NewEventManager()
+	st := &GameState{
+		Catalog: cat,
+		truth:   truth,
+		Views:   map[Owner]*PlayerView{HumanOwner: humanView, AlienOwner: alienView},
+		Events:  NewEventLog(),
+		Factions: map[Owner]*Faction{
+			HumanOwner: {},
+			AlienOwner: {},
+		},
+		Homes:       map[Owner]string{HumanOwner: "sol"},
+		PendingCmds: []*PendingCommand{},
+		rng:         rng,
 	}
-	return SolGroundTruthSnapshot{
-		Status:     sol.Status,
-		EconLevel:  sol.EconLevel,
-		Wealth:     sol.Wealth,
-		LocalUnits: copyUnits(sol.LocalUnits),
-		FleetIDs:   append([]string(nil), sol.FleetIDs...),
+	st.Propagator = NewPropagator(em)
+	return st
+}
+
+// ReadHomeGroundTruth is the single explicit affordance by which the HTTP
+// layer reads a player's own home-system state from Truth. The player sees
+// their own home with no light-speed delay; this preserves DR-1 in spirit
+// by limiting access to one grep-able accessor with a clear name.
+// (FR-44 partial; renamed from ReadSolGroundTruth in M2.)
+func (s *GameState) ReadHomeGroundTruth(p Owner) HomeGroundTruthSnapshot {
+	home := s.truth.Systems[s.Homes[p]]
+	if home == nil {
+		return HomeGroundTruthSnapshot{}
+	}
+	return HomeGroundTruthSnapshot{
+		Status:     home.Status,
+		EconLevel:  home.EconLevel,
+		Wealth:     home.Wealth,
+		LocalUnits: copyUnits(home.LocalUnits),
+		FleetIDs:   append([]string(nil), home.FleetIDs...),
 	}
 }
 
@@ -151,25 +251,19 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 
 	// Log command arrival (FR-015)
 	hasCommLaser := systemHasCommLaser(s.truth, sys)
-	distFromSol := 0.0
-	if e := s.Catalog.Get(cmd.TargetID); e != nil {
-		distFromSol = e.DistFromSol
-	}
-	arrivalArrYear := arrivalYearFor(s.Clock, distFromSol, hasCommLaser)
-	s.Events.Record(&Event{
+	s.RecordEvent(&Event{
 		EventYear:   s.Clock,
-		ArrivalYear: arrivalArrYear,
 		SystemID:    cmd.TargetID,
 		Type:        EventCommandArrived,
 		Description: fmt.Sprintf("Command %s arrived at %s", cmd.Type, displayName),
-	})
+	}, cmd.Issuer, hasCommLaser, false)
 
 	switch cmd.Type {
 	case CmdConstruct:
-		if err := ValidateConstruct(sys, cmd.WeaponType, cmd.Quantity); err != nil {
+		if err := ValidateConstruct(sys, cmd.WeaponType, cmd.Quantity, cmd.Issuer); err != nil {
 			return err
 		}
-		ExecuteConstruct(s, sys, cmd.WeaponType, cmd.Quantity)
+		ExecuteConstruct(s, sys, cmd.WeaponType, cmd.Quantity, cmd.Issuer)
 
 	case CmdMove:
 		fleet := s.truth.Fleet(cmd.FleetID)
@@ -198,29 +292,25 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 
 		// Record EventFleetDeparted; reportable iff source has a comm laser.
 		// (Replaces the old synchronous BroadcastFleetDeparted path; DR-3.)
-		if fleet.Owner == HumanOwner {
-			depArrYear := arrivalYearFor(s.Clock, distFromSol, hasCommLaser)
-			s.Events.Record(&Event{
-				EventYear:   s.Clock,
-				ArrivalYear: depArrYear,
-				SystemID:    cmd.TargetID,
-				Type:        EventFleetDeparted,
-				Description: fmt.Sprintf("Fleet %s departed %s for %s", fleet.Name, displayName, cmd.DestID),
-				Details: &FleetDepartureDetails{
-					FleetID:     fleet.ID,
-					FleetName:   fleet.Name,
-					Owner:       fleet.Owner,
-					Units:       copyUnits(fleet.Units),
-					SourceID:    cmd.TargetID,
-					DestID:      cmd.DestID,
-					DepartYear:  fleet.DepartYear,
-					ArrivalYear: fleet.ArrivalYear,
-				},
-			})
-		}
+		s.RecordEvent(&Event{
+			EventYear:   s.Clock,
+			SystemID:    cmd.TargetID,
+			Type:        EventFleetDeparted,
+			Description: fmt.Sprintf("Fleet %s departed %s for %s", fleet.Name, displayName, cmd.DestID),
+			Details: &FleetDepartureDetails{
+				FleetID:     fleet.ID,
+				FleetName:   fleet.Name,
+				Owner:       fleet.Owner,
+				Units:       copyUnits(fleet.Units),
+				SourceID:    cmd.TargetID,
+				DestID:      cmd.DestID,
+				DepartYear:  fleet.DepartYear,
+				ArrivalYear: fleet.ArrivalYear,
+			},
+		}, cmd.Issuer, hasCommLaser, false)
 
 	case CmdCreateFleet:
-		if err := ExecuteCreateFleet(s, sys); err != nil {
+		if err := ExecuteCreateFleet(s, sys, cmd.Issuer); err != nil {
 			return err
 		}
 
@@ -234,66 +324,57 @@ func (s *GameState) ApplyCommand(cmd *PendingCommand) error {
 	}
 
 	// Log successful execution
-	execArrYear := arrivalYearFor(s.Clock, distFromSol, hasCommLaser)
-	s.Events.Record(&Event{
+	s.RecordEvent(&Event{
 		EventYear:   s.Clock,
-		ArrivalYear: execArrYear,
 		SystemID:    cmd.TargetID,
 		Type:        EventCommandExecuted,
 		Description: fmt.Sprintf("Command %s executed at %s", cmd.Type, displayName),
-	})
+	}, cmd.Issuer, hasCommLaser, false)
 	return nil
 }
 
-// CheckVictory evaluates win/loss conditions. Returns (true, winner, reason)
-// if the game is over, or (false, "", "") otherwise. (FR-056, FR-057)
+// CheckVictory evaluates win conditions symmetrically. Returns (true,
+// winner, reason) if the game is over, or (false, "", "") otherwise.
+// (FR-54, FR-55, FR-56, FR-57, FR-60)
 func (s *GameState) CheckVictory() (over bool, winner Owner, reason string) {
-	totalSystems := len(s.truth.Systems)
-	if totalSystems == 0 {
+	if len(s.truth.Systems) == 0 {
 		return
 	}
 
-	// Count current system statuses
-	humanHeld := 0
-	alienHeld := 0
-	for _, sys := range s.truth.Systems {
-		switch sys.Status {
-		case StatusHuman:
-			humanHeld++
-		case StatusAlien:
-			alienHeld++
+	// 1. Capture-of-home check, both directions.
+	for _, p := range []Owner{HumanOwner, AlienOwner} {
+		opp := OpposingOwner(p)
+		oppHome := s.truth.Systems[s.Homes[opp]]
+		if oppHome != nil && statusToOwner(oppHome.Status) == p {
+			return true, p, fmt.Sprintf("%s captured the opponent's home (%s).",
+				p, oppHome.ID)
 		}
 	}
 
-	// FR-057: Alien wins if it captures Earth OR holds ≥ AlienWinCaptureFraction of all systems.
-	if sol, ok := s.truth.Systems["sol"]; ok && sol.Status == StatusAlien {
-		return true, AlienOwner, "Earth has been captured by alien forces."
-	}
-	humanInitial := len(s.Human.InitialSystemIDs)
-	if humanInitial > 0 && float64(alienHeld)/float64(humanInitial) >= AlienWinCaptureFraction {
-		return true, AlienOwner, fmt.Sprintf("Alien forces control %.0f%% of human systems.", float64(alienHeld)/float64(humanInitial)*100)
-	}
-
-	// FR-056: Human wins if alien exhausted AND Earth human-held AND
-	// fraction of originally human-held systems still human-held ≥ HumanWinRetentionFraction.
-	if s.Alien.Exhausted {
-		sol, solOK := s.truth.Systems["sol"]
-		if solOK && sol.Status == StatusHuman {
-			initialCount := len(s.Human.InitialSystemIDs)
-			if initialCount > 0 {
-				retained := 0
-				for _, id := range s.Human.InitialSystemIDs {
-					if sys, ok := s.truth.Systems[id]; ok && sys.Status == StatusHuman {
-						retained++
-					}
-				}
-				retainedFrac := float64(retained) / float64(initialCount)
-				if retainedFrac >= HumanWinRetentionFraction {
-					return true, HumanOwner, fmt.Sprintf(
-						"Alien forces exhausted. Earth and %.0f%% of systems retained.", retainedFrac*100)
-				}
+	// 2. Initial-systems-fraction check, both directions.
+	for _, p := range []Owner{HumanOwner, AlienOwner} {
+		opp := OpposingOwner(p)
+		fac := s.Factions[opp]
+		if fac == nil || len(fac.InitialSystemIDs) == 0 {
+			continue
+		}
+		held := 0
+		for _, id := range fac.InitialSystemIDs {
+			if sys, ok := s.truth.Systems[id]; ok && statusToOwner(sys.Status) == p {
+				held++
 			}
 		}
+		frac := float64(held) / float64(len(fac.InitialSystemIDs))
+		if frac >= WinRetentionFraction {
+			return true, p, fmt.Sprintf(
+				"%s holds %.0f%% of opponent's initial systems.", p, frac*100)
+		}
+	}
+
+	// 3. Draw on game-length cap.
+	if s.Clock >= DrawYearCap {
+		return true, DrawWinner, fmt.Sprintf(
+			"Game ended at year %.1f without a victor.", s.Clock)
 	}
 
 	return false, "", ""

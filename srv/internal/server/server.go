@@ -12,6 +12,9 @@ import (
 	"github.com/gmofishsauce/SpaceGame/srv/internal/game"
 )
 
+// playerKey is the context key for the resolved player Owner.
+type playerKey struct{}
+
 // Server is the HTTP server for SpaceGame.
 type Server struct {
 	engine  *game.Engine
@@ -34,15 +37,10 @@ func New(engine *game.Engine, events *game.EventManager, state *game.GameState) 
 // cancelled or a fatal error occurs. On ctx cancellation the server shuts down
 // gracefully with a 5-second timeout. (FR-001, NFR-002)
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	// Build embedded SPA file server.
 	subFS, err := fs.Sub(webui.DistFS, "dist")
 	if err != nil {
 		return err
 	}
-	// The file server is registered as the final catch-all in buildMux, but we
-	// need the sub-FS to be known at route time. We set it here after the mux
-	// is already built by embedding it in the default-catch handler. The mux
-	// was built with a placeholder; swap it out.
 	s.httpSrv.Handler = s.buildMuxWithFS(subFS)
 
 	errCh := make(chan error, 1)
@@ -72,15 +70,16 @@ func (s *Server) buildMux() http.Handler {
 func (s *Server) buildMuxWithFS(spaFS fs.FS) http.Handler {
 	mux := http.NewServeMux()
 
-	// API routes (registered before the catch-all so they take priority).
+	// Routes that do NOT require ?player identification.
 	mux.HandleFunc("/api/stars", s.recoverMiddleware(s.handleStars))
-	mux.HandleFunc("/api/state", s.recoverMiddleware(s.handleState))
-	mux.HandleFunc("/api/events", s.recoverMiddleware(s.handleEvents))
-	mux.HandleFunc("/api/command", s.recoverMiddleware(s.handleCommand))
-	mux.HandleFunc("/api/pause", s.recoverMiddleware(s.handlePause))
 	mux.HandleFunc("/api/debug/state", s.recoverMiddleware(s.handleDebugState))
 
-	// SPA catch-all: serve from embedded FS. If spaFS is nil serve a bare 404.
+	// Routes that require ?player=human|alien. (FR-36, FR-37, FR-38)
+	mux.HandleFunc("/api/state", s.recoverMiddleware(s.playerMiddleware(s.handleState)))
+	mux.HandleFunc("/api/events", s.recoverMiddleware(s.playerMiddleware(s.handleEvents)))
+	mux.HandleFunc("/api/command", s.recoverMiddleware(s.playerMiddleware(s.handleCommand)))
+	mux.HandleFunc("/api/pause", s.recoverMiddleware(s.playerMiddleware(s.handlePause)))
+
 	if spaFS != nil {
 		mux.Handle("/", http.FileServerFS(spaFS))
 	} else {
@@ -90,6 +89,33 @@ func (s *Server) buildMuxWithFS(spaFS fs.FS) http.Handler {
 	}
 
 	return mux
+}
+
+// playerMiddleware reads ?player, validates it is "human" or "alien", and
+// stores the resolved Owner in the request context. Rejects missing or
+// invalid values with HTTP 400. (FR-36, FR-37, FR-38)
+func (s *Server) playerMiddleware(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw := r.URL.Query().Get("player")
+		var player game.Owner
+		switch raw {
+		case "human":
+			player = game.HumanOwner
+		case "alien":
+			player = game.AlienOwner
+		default:
+			writeError(w, http.StatusBadRequest, "unknown player")
+			return
+		}
+		ctx := context.WithValue(r.Context(), playerKey{}, player)
+		h(w, r.WithContext(ctx))
+	}
+}
+
+// playerOf extracts the resolved player Owner from the request context.
+// Panics if playerMiddleware was not applied (programming error).
+func playerOf(r *http.Request) game.Owner {
+	return r.Context().Value(playerKey{}).(game.Owner)
 }
 
 // recoverMiddleware wraps h, recovering any panics and returning 500.

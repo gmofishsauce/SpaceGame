@@ -65,8 +65,6 @@ const (
 	EventCommandFailed   EventType = "command_failed"   // command impossible or ignored
 	EventReporterReturn  EventType = "reporter_return"  // reporter arrived at Earth
 	EventEconGrowth      EventType = "econ_growth"      // system econ level increased
-	EventAlienSpawn      EventType = "alien_spawn"      // internal only
-	EventAlienExhausted  EventType = "alien_exhausted"
 	EventGameOver        EventType = "game_over"
 )
 
@@ -94,13 +92,14 @@ type CombatDetails struct {
 type ConstructionDetails struct {
 	WeaponType WeaponType `json:"weaponType"`
 	Quantity   int        `json:"quantity"`
-	// FleetID and FleetName are server-internal fields (not exposed in the
-	// public DTO, hence json:"-"). They record the truth-side fleet that
+	// FleetID, FleetName, and Owner are server-internal fields (not exposed in
+	// the public DTO, hence json:"-"). They record the truth-side fleet that
 	// received the units when WeaponType is mobile, so the propagator can
-	// mirror the truth-side decision into SolView. Empty for non-mobile
+	// mirror the truth-side decision into PlayerView. Empty for non-mobile
 	// constructions.
 	FleetID   string `json:"-"`
 	FleetName string `json:"-"`
+	Owner     Owner  `json:"-"`
 }
 
 // CommandFailedDetails is the payload for EventCommandFailed.

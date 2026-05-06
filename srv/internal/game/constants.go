@@ -20,28 +20,19 @@ const (
 	EconLevelMean   = 2.5
 	EconLevelStddev = 1.0
 
-	// Periphery definition for alien entry points (A-2)
-	PeripheryFraction = 0.75 // systems with dist > PeripheryFraction * maxDist
-	AlienEntryCount   = 2   // number of alien entry points per game
+	// WinRetentionFraction is the shared per-side threshold for FR-55:
+	// a player wins if it holds at least this fraction of the opponent's
+	// initial systems. Single tunable; identical for both sides. (FR-55,
+	// FR-58, NFR-15)
+	WinRetentionFraction = 0.60
 
-	// Alien spawn behavior (G-1)
-	AlienSpawnIntervalYears = 20.0 // in-game years between alien force arrivals
+	// DrawYearCap is the in-game year at which an unfinished game ends
+	// in a draw. Subject to playtesting. (FR-57, FR-58, NFR-15)
+	DrawYearCap = 500.0
 
-	// Alien exhaustion (FR-055)
-	AlienExhaustionThreshold = 400 // cumulative alien units destroyed → exhaustion
-
-	// Victory/defeat (FR-056, FR-057)
-	HumanWinRetentionFraction = 0.60 // fraction of initial human systems to retain
-	AlienWinCaptureFraction   = 0.40 // fraction of all systems for alien win
-
-	// AlienDormancyYears is the number of in-game years after game start during
-	// which the alien bot issues no move commands. Tuned for gameplay balance:
-	// gives the human player time to issue initial construction and scouting
-	// orders before the alien assault begins.
-	AlienDormancyYears = 40.0
-
-	// Bot tick cadence: call bot every N engine ticks (FR-062)
-	BotTickCadence = 10
+	// AlienHomeDisplayName is the common name of the alien home star in the
+	// alien CSV files. Used to identify and seed the alien home system. (AS-2)
+	AlienHomeDisplayName = "61 Ursae Majoris"
 
 	// Clock sync broadcast cadence: every N engine ticks (≈ every 10 real seconds)
 	ClockSyncCadence = 100
@@ -72,16 +63,3 @@ var WeaponDefs = map[WeaponType]WeaponDef{
 	WeaponCommLaser:      {Cost: 64, MinLevel: 4, AttackPower: 0, Vulnerability: 10, CanMove: true, Reports: false, CommLaser: true},
 }
 
-// AlienInitialComposition is the unit mix placed at each alien entry point at game start. (G-1)
-var AlienInitialComposition = map[WeaponType]int{
-	WeaponEscort:      3,
-	WeaponBattleship:  2,
-	WeaponInterceptor: 5,
-}
-
-// AlienSpawnComposition is the unit mix added at each spawn event. (G-1)
-var AlienSpawnComposition = map[WeaponType]int{
-	WeaponEscort:      4,
-	WeaponBattleship:  1,
-	WeaponInterceptor: 2,
-}

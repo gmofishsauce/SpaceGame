@@ -10,6 +10,13 @@ import (
 // Helpers: minimal state factories
 // ---------------------------------------------------------------------------
 
+// humanArrival is a test helper that returns an Event.Arrival map with the
+// given arrival year for the human player and math.MaxFloat64 (unreportable)
+// for the alien player. Mirrors the pre-M3 single-side ArrivalYear field.
+func humanArrival(y float64) map[Owner]float64 {
+	return map[Owner]float64{HumanOwner: y, AlienOwner: math.MaxFloat64}
+}
+
 // newMinimalState returns a GameState with Sol and one remote system
 // ("alpha-centauri") wired through a StarCatalog, Truth, SolView, EventLog,
 // and Propagator. It is NOT a fully-initialised game (no engine, no bot) --
@@ -41,7 +48,7 @@ func newMinimalState() *GameState {
 		},
 		Fleets: map[string]*TrueFleet{},
 	}
-	view := &SolView{
+	view := &PlayerView{
 		Systems: map[string]*KnownSystem{
 			"sol": {
 				ID:         "sol",
@@ -63,15 +70,21 @@ func newMinimalState() *GameState {
 	}
 
 	st := &GameState{
-		Catalog:     cat,
-		truth:       truth,
-		SolView:     view,
-		Events:      NewEventLog(),
+		Catalog: cat,
+		truth:   truth,
+		Views:   map[Owner]*PlayerView{HumanOwner: view},
+		Events:  NewEventLog(),
+		Factions: map[Owner]*Faction{
+			HumanOwner: {InitialSystemIDs: []string{"sol", "alpha-centauri"}},
+			AlienOwner: {},
+		},
+		Homes: map[Owner]string{
+			HumanOwner: "sol",
+		},
 		PendingCmds: []*PendingCommand{},
 		rng:         rand.New(rand.NewSource(1)),
 	}
 	st.Propagator = NewPropagator(NewEventManager())
-	st.Human.InitialSystemIDs = []string{"sol", "alpha-centauri"}
 	return st
 }
 
@@ -102,7 +115,7 @@ func addHumanSystem(st *GameState, id string, dist float64) *TrueSystem {
 		LocalUnits: map[WeaponType]int{},
 	}
 	st.truth.Systems[id] = ts
-	st.SolView.Systems[id] = &KnownSystem{
+	st.Views[HumanOwner].Systems[id] = &KnownSystem{
 		ID:         id,
 		Status:     StatusHuman,
 		LocalUnits: map[WeaponType]int{},
@@ -120,7 +133,7 @@ func addUninhabitedSystem(st *GameState, id string, dist float64) *TrueSystem {
 		LocalUnits: map[WeaponType]int{},
 	}
 	st.truth.Systems[id] = ts
-	st.SolView.Systems[id] = &KnownSystem{
+	st.Views[HumanOwner].Systems[id] = &KnownSystem{
 		ID:         id,
 		Status:     StatusUninhabited,
 		LocalUnits: map[WeaponType]int{},
@@ -145,14 +158,14 @@ func addFleet(st *GameState, sys *TrueSystem, owner Owner, units map[WeaponType]
 	st.truth.Fleets[fid] = f
 	sys.FleetIDs = append(sys.FleetIDs, fid)
 	if owner == HumanOwner {
-		st.SolView.Fleets[fid] = &KnownFleet{
+		st.Views[HumanOwner].Fleets[fid] = &KnownFleet{
 			ID:         fid,
 			Name:       fname,
 			Owner:      owner,
 			Units:      copyUnits(units),
 			LocationID: sys.ID,
 		}
-		ks := st.SolView.Systems[sys.ID]
+		ks := st.Views[HumanOwner].Systems[sys.ID]
 		if ks != nil {
 			ks.FleetIDs = append(ks.FleetIDs, fid)
 		}
@@ -206,18 +219,21 @@ func TestCheckVictory_AlienCapturesEarth(t *testing.T) {
 }
 
 func TestCheckVictory_AlienCapturesFraction(t *testing.T) {
-	// 5 initial human systems; 2 alien-held = 40% which equals AlienWinCaptureFraction.
+	// 5 initial human systems; 3 alien-held = 60% meets WinRetentionFraction.
+	// (M13 will rewrite this symmetrically; for now exercise the new threshold.)
 	st := newMinimalState()
 	for _, id := range []string{"sys-b", "sys-c", "sys-d"} {
 		addHumanSystem(st, id, 1)
-		st.Human.InitialSystemIDs = append(st.Human.InitialSystemIDs, id)
+		st.Factions[HumanOwner].InitialSystemIDs = append(
+			st.Factions[HumanOwner].InitialSystemIDs, id)
 	}
 	st.truth.Systems["sys-b"].Status = StatusAlien
-	st.truth.Systems["sys-c"].Status = StatusAlien // 2/5 = 0.40
+	st.truth.Systems["sys-c"].Status = StatusAlien
+	st.truth.Systems["sys-d"].Status = StatusAlien // 3/5 = 0.60
 
 	over, winner, _ := st.CheckVictory()
 	if !over {
-		t.Fatal("expected alien win at 40% capture, got over=false")
+		t.Fatal("expected alien win at 60% capture, got over=false")
 	}
 	if winner != AlienOwner {
 		t.Errorf("expected alien winner, got %q", winner)
@@ -225,50 +241,96 @@ func TestCheckVictory_AlienCapturesFraction(t *testing.T) {
 }
 
 func TestCheckVictory_AlienJustBelowFraction(t *testing.T) {
-	// 5 initial human systems; 1 alien-held = 20% < 40%; Sol still human.
+	// 5 initial human systems; 2 alien-held = 40% < 60% threshold; Sol still human.
 	st := newMinimalState()
 	for _, id := range []string{"sys-b", "sys-c", "sys-d"} {
 		addHumanSystem(st, id, 1)
-		st.Human.InitialSystemIDs = append(st.Human.InitialSystemIDs, id)
+		st.Factions[HumanOwner].InitialSystemIDs = append(
+			st.Factions[HumanOwner].InitialSystemIDs, id)
 	}
-	st.truth.Systems["sys-b"].Status = StatusAlien // 1/5 = 20%
+	st.truth.Systems["sys-b"].Status = StatusAlien
+	st.truth.Systems["sys-c"].Status = StatusAlien // 2/5 = 40%
 
 	over, _, _ := st.CheckVictory()
 	if over {
-		t.Fatal("expected game not over at 20% alien capture, got over=true")
+		t.Fatal("expected game not over at 40% alien capture, got over=true")
 	}
 }
 
-func TestCheckVictory_HumanWin(t *testing.T) {
+func TestCheckVictory_HumanCapturesAlienHome(t *testing.T) {
 	st := newMinimalState()
-	st.Alien.Exhausted = true
-	// Both initial systems still human-held → retainedFrac = 1.0 ≥ 0.60.
+	// Wire an alien home system.
+	addCatalogEntry(st.Catalog, "61-uma", "61 Ursae Majoris", 30)
+	st.truth.Systems["61-uma"] = &TrueSystem{
+		ID:         "61-uma",
+		Status:     StatusHuman, // human-held — human wins
+		LocalUnits: map[WeaponType]int{},
+	}
+	st.Views[HumanOwner].Systems["61-uma"] = &KnownSystem{ID: "61-uma", Status: StatusHuman}
+	st.Homes[AlienOwner] = "61-uma"
+	st.Factions[AlienOwner].InitialSystemIDs = []string{"61-uma"}
 
 	over, winner, _ := st.CheckVictory()
 	if !over {
-		t.Fatal("expected human win when alien exhausted and all systems retained")
+		t.Fatal("expected human win when human holds alien home")
 	}
 	if winner != HumanOwner {
 		t.Errorf("expected human winner, got %q", winner)
 	}
 }
 
-func TestCheckVictory_HumanExhaustedButTooManySystemsLost(t *testing.T) {
-	// 3 initial systems; 2 lost = 33% retained < 60% threshold.
-	// Alien exhausted but retention fraction not met → no human win.
-	// However note: 2/3 ≈ 67% captured ≥ 40% → alien win via fraction.
-	// We just verify the human win condition is NOT triggered.
+func TestCheckVictory_HumanCapturesFraction(t *testing.T) {
+	// 5 alien initial systems; human holds 3 = 60% meets WinRetentionFraction.
 	st := newMinimalState()
-	addHumanSystem(st, "barnard", 6.0)
-	st.truth.Systems["barnard"].Status = StatusAlien
-	st.Human.InitialSystemIDs = []string{"sol", "alpha-centauri", "barnard"}
-	st.truth.Systems["alpha-centauri"].Status = StatusAlien
-
-	st.Alien.Exhausted = true
+	st.Homes[AlienOwner] = "61-uma"
+	for _, id := range []string{"61-uma", "a61-b", "a61-c", "a61-d", "a61-e"} {
+		addCatalogEntry(st.Catalog, id, id, 30)
+		st.truth.Systems[id] = &TrueSystem{ID: id, Status: StatusAlien, LocalUnits: map[WeaponType]int{}}
+		st.Views[HumanOwner].Systems[id] = &KnownSystem{ID: id, Status: StatusAlien}
+		st.Factions[AlienOwner].InitialSystemIDs = append(st.Factions[AlienOwner].InitialSystemIDs, id)
+	}
+	// Human captures 3 of the 5 alien systems.
+	st.truth.Systems["a61-b"].Status = StatusHuman
+	st.truth.Systems["a61-c"].Status = StatusHuman
+	st.truth.Systems["a61-d"].Status = StatusHuman
 
 	over, winner, _ := st.CheckVictory()
-	if over && winner == HumanOwner {
-		t.Fatal("expected human NOT to win when retention < 60%, but got human win")
+	if !over {
+		t.Fatal("expected human win at 60% alien capture, got over=false")
+	}
+	if winner != HumanOwner {
+		t.Errorf("expected human winner, got %q", winner)
+	}
+}
+
+func TestCheckVictory_DrawAtYearCap(t *testing.T) {
+	st := newMinimalState()
+	st.Clock = DrawYearCap
+
+	over, winner, _ := st.CheckVictory()
+	if !over {
+		t.Fatal("expected draw at DrawYearCap, got over=false")
+	}
+	if winner != DrawWinner {
+		t.Errorf("expected draw winner %q, got %q", DrawWinner, winner)
+	}
+}
+
+func TestCheckVictory_WinPreemptsDrawSameTick(t *testing.T) {
+	// Clock == DrawYearCap but alien also captured Sol: alien win should preempt draw.
+	st := newMinimalState()
+	st.Clock = DrawYearCap
+	st.truth.Systems["sol"].Status = StatusAlien
+
+	over, winner, _ := st.CheckVictory()
+	if !over {
+		t.Fatal("expected game over")
+	}
+	if winner == DrawWinner {
+		t.Error("expected real win to preempt draw at same tick")
+	}
+	if winner != AlienOwner {
+		t.Errorf("expected alien winner, got %q", winner)
 	}
 }
 
@@ -284,7 +346,7 @@ func TestValidateConstruct_ValidCase(t *testing.T) {
 		Wealth:     1000,
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponBattleship, 1); err != nil {
+	if err := ValidateConstruct(sys, WeaponBattleship, 1, HumanOwner); err != nil {
 		t.Errorf("expected no error for valid construct, got: %v", err)
 	}
 }
@@ -297,7 +359,7 @@ func TestValidateConstruct_InsufficientWealth(t *testing.T) {
 		Wealth:     10, // Battleship costs 32
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponBattleship, 1); err == nil {
+	if err := ValidateConstruct(sys, WeaponBattleship, 1, HumanOwner); err == nil {
 		t.Fatal("expected error for insufficient wealth, got nil")
 	}
 }
@@ -310,7 +372,7 @@ func TestValidateConstruct_AlienHeldSystem(t *testing.T) {
 		Wealth:     1000,
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 1); err == nil {
+	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 1, HumanOwner); err == nil {
 		t.Fatal("expected error for alien-held system, got nil")
 	}
 }
@@ -323,7 +385,7 @@ func TestValidateConstruct_ZeroQuantity(t *testing.T) {
 		Wealth:     1000,
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 0); err == nil {
+	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 0, HumanOwner); err == nil {
 		t.Fatal("expected error for zero quantity, got nil")
 	}
 }
@@ -336,7 +398,7 @@ func TestValidateConstruct_UnknownWeaponType(t *testing.T) {
 		Wealth:     1000,
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponType("phaser_bank"), 1); err == nil {
+	if err := ValidateConstruct(sys, WeaponType("phaser_bank"), 1, HumanOwner); err == nil {
 		t.Fatal("expected error for unknown weapon type, got nil")
 	}
 }
@@ -351,7 +413,7 @@ func TestValidateConstruct_ExactWealth(t *testing.T) {
 		Wealth:     def.Cost,
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 1); err != nil {
+	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 1, HumanOwner); err != nil {
 		t.Errorf("expected no error with exact wealth, got: %v", err)
 	}
 }
@@ -365,7 +427,7 @@ func TestValidateConstruct_MultipleQuantityCost(t *testing.T) {
 		Wealth:     2,
 		LocalUnits: map[WeaponType]int{},
 	}
-	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 3); err == nil {
+	if err := ValidateConstruct(sys, WeaponOrbitalDefense, 3, HumanOwner); err == nil {
 		t.Fatal("expected error when total cost (3) exceeds wealth (2), got nil")
 	}
 }
@@ -389,8 +451,9 @@ func TestExtractAndSendReporters_ReportersFleeBeforeCombat(t *testing.T) {
 		{weaponType: WeaponReporter, owner: HumanOwner},
 		{weaponType: WeaponEscort, owner: HumanOwner},
 	}
+	alienUnits := []combatUnit{}
 
-	fled := extractAndSendReporters(st, remote, &humanUnits)
+	fled := extractAndSendReporters(st, remote, &humanUnits, &alienUnits, HumanOwner)
 
 	if !fled {
 		t.Fatal("expected reportersFled=true, got false")
@@ -438,8 +501,9 @@ func TestExtractAndSendReporters_NoReporters(t *testing.T) {
 		{weaponType: WeaponEscort, owner: HumanOwner},
 		{weaponType: WeaponEscort, owner: HumanOwner},
 	}
+	alienUnits := []combatUnit{}
 
-	fled := extractAndSendReporters(st, remote, &humanUnits)
+	fled := extractAndSendReporters(st, remote, &humanUnits, &alienUnits, HumanOwner)
 
 	if fled {
 		t.Error("expected reportersFled=false when no reporters present, got true")
@@ -454,8 +518,9 @@ func TestExtractAndSendReporters_ArrivalYearMatchesTravel(t *testing.T) {
 	remote := st.truth.Systems["alpha-centauri"] // DistFromSol = 4.37 LY
 	addFleet(st, remote, HumanOwner, map[WeaponType]int{WeaponReporter: 1})
 	humanUnits := []combatUnit{{weaponType: WeaponReporter, owner: HumanOwner}}
+	alienUnits := []combatUnit{}
 
-	extractAndSendReporters(st, remote, &humanUnits)
+	extractAndSendReporters(st, remote, &humanUnits, &alienUnits, HumanOwner)
 
 	expectedTravel := st.Catalog.Get("alpha-centauri").DistFromSol / FleetSpeedC // 4.37 / 0.8 ≈ 5.4625 years
 	for _, f := range st.truth.Fleets {
@@ -467,20 +532,21 @@ func TestExtractAndSendReporters_ArrivalYearMatchesTravel(t *testing.T) {
 	}
 }
 
-func TestExtractAndSendReporters_NoSolSystem(t *testing.T) {
-	// If Sol is missing from truth, reporters should not panic and fled=false.
+func TestExtractAndSendReporters_NoHome(t *testing.T) {
+	// If a player's home ID is not set, reporters should not panic and fled=false.
 	st := newMinimalState()
-	delete(st.truth.Systems, "sol")
+	st.Homes[HumanOwner] = "" // clear the home entry
 	remote := st.truth.Systems["alpha-centauri"]
 	addFleet(st, remote, HumanOwner, map[WeaponType]int{WeaponReporter: 2})
 	humanUnits := []combatUnit{
 		{weaponType: WeaponReporter, owner: HumanOwner},
 		{weaponType: WeaponReporter, owner: HumanOwner},
 	}
+	alienUnits := []combatUnit{}
 
-	fled := extractAndSendReporters(st, remote, &humanUnits)
+	fled := extractAndSendReporters(st, remote, &humanUnits, &alienUnits, HumanOwner)
 	if fled {
-		t.Error("expected fled=false when Sol system is missing")
+		t.Error("expected fled=false when home ID is empty")
 	}
 }
 
@@ -552,7 +618,7 @@ func TestPropagator_CaptureEventApplied(t *testing.T) {
 	evt := &Event{
 		ID:          "evt-1",
 		EventYear:   3.0,
-		ArrivalYear: 5.0, // arrived before clock
+		Arrival:     humanArrival(5.0), // arrived before clock
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemCaptured,
 	}
@@ -560,11 +626,11 @@ func TestPropagator_CaptureEventApplied(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusAlien {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusAlien {
 		t.Errorf("expected SolView Status=alien after capture event, got %q", got)
 	}
-	if !evt.AppliedToView {
-		t.Error("expected evt.AppliedToView=true")
+	if !evt.AppliedToView[HumanOwner] {
+		t.Error("expected evt.AppliedToView[HumanOwner]=true")
 	}
 }
 
@@ -575,7 +641,7 @@ func TestPropagator_FutureEventNotApplied(t *testing.T) {
 	evt := &Event{
 		ID:          "evt-2",
 		EventYear:   5.0,
-		ArrivalYear: 20.0, // arrives after current clock
+		Arrival:     humanArrival(20.0), // arrives after current clock
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemCaptured,
 	}
@@ -583,11 +649,11 @@ func TestPropagator_FutureEventNotApplied(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusHuman {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusHuman {
 		t.Errorf("expected SolView Status=human (event not yet arrived), got %q", got)
 	}
-	if evt.AppliedToView {
-		t.Error("expected evt.AppliedToView=false for future event")
+	if evt.AppliedToView[HumanOwner] {
+		t.Error("expected evt.AppliedToView[HumanOwner]=false for future event")
 	}
 }
 
@@ -598,7 +664,7 @@ func TestPropagator_UnreportedEventNeverApplied(t *testing.T) {
 	evt := &Event{
 		ID:          "evt-3",
 		EventYear:   1.0,
-		ArrivalYear: math.MaxFloat64, // unreported
+		Arrival:     humanArrival(math.MaxFloat64), // unreported
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemCaptured,
 	}
@@ -606,11 +672,11 @@ func TestPropagator_UnreportedEventNeverApplied(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusHuman {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusHuman {
 		t.Errorf("expected SolView Status=human (unreported), got %q", got)
 	}
-	if evt.AppliedToView {
-		t.Error("expected evt.AppliedToView=false for unreported event")
+	if evt.AppliedToView[HumanOwner] {
+		t.Error("expected evt.AppliedToView[HumanOwner]=false for unreported event")
 	}
 }
 
@@ -623,7 +689,7 @@ func TestPropagator_Idempotent(t *testing.T) {
 	evt := &Event{
 		ID:          "evt-4",
 		EventYear:   1.0,
-		ArrivalYear: 5.0,
+		Arrival: humanArrival(5.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemCaptured,
 	}
@@ -632,7 +698,7 @@ func TestPropagator_Idempotent(t *testing.T) {
 	st.Propagator.Propagate(st)
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusAlien {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusAlien {
 		t.Errorf("expected SolView Status=alien after double propagate, got %q", got)
 	}
 }
@@ -644,7 +710,7 @@ func TestPropagator_ConstructionAddsKnownUnits(t *testing.T) {
 	evt := &Event{
 		ID:          "evt-5",
 		EventYear:   1.0,
-		ArrivalYear: 5.0,
+		Arrival: humanArrival(5.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventConstructionDone,
 		Details:     &ConstructionDetails{WeaponType: WeaponOrbitalDefense, Quantity: 3},
@@ -653,20 +719,20 @@ func TestPropagator_ConstructionAddsKnownUnits(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].LocalUnits[WeaponOrbitalDefense]; got != 3 {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].LocalUnits[WeaponOrbitalDefense]; got != 3 {
 		t.Errorf("expected SolView LocalUnits[orbital_defense]=3, got %d", got)
 	}
 }
 
 func TestPropagator_RetakenEventUpdatesStatus(t *testing.T) {
 	st := newMinimalState()
-	st.SolView.Systems["alpha-centauri"].Status = StatusAlien // start as alien-held (known)
+	st.Views[HumanOwner].Systems["alpha-centauri"].Status = StatusAlien // start as alien-held (known)
 	st.Clock = 10.0
 
 	evt := &Event{
 		ID:          "evt-6",
 		EventYear:   2.0,
-		ArrivalYear: 6.0,
+		Arrival: humanArrival(6.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemRetaken,
 	}
@@ -674,7 +740,7 @@ func TestPropagator_RetakenEventUpdatesStatus(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusHuman {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusHuman {
 		t.Errorf("expected SolView Status=human after retaken event, got %q", got)
 	}
 }
@@ -789,16 +855,17 @@ func TestAccumulateWealth_HumanSystemAccumulates(t *testing.T) {
 	}
 }
 
-func TestAccumulateWealth_AlienHeldDoesNotAccumulate(t *testing.T) {
+func TestAccumulateWealth_AlienHeldAccumulates(t *testing.T) {
 	st := newMinimalState()
 	sys := st.truth.Systems["alpha-centauri"]
 	sys.Status = StatusAlien
+	sys.EconLevel = 1
 	sys.Wealth = 0
 
 	AccumulateWealth(st, 1.0)
 
-	if sys.Wealth != 0 {
-		t.Errorf("alien-held system accumulated wealth: %.4f", sys.Wealth)
+	if sys.Wealth <= 0 {
+		t.Errorf("alien-held system should accumulate wealth; got %.4f", sys.Wealth)
 	}
 }
 
@@ -906,12 +973,12 @@ func TestConquest_HumanFleetWithCommLaser_ClaimsUninhabited(t *testing.T) {
 	if conquestEvt == nil {
 		t.Fatal("expected system_conquered event, found none")
 	}
-	if conquestEvt.ArrivalYear >= math.MaxFloat64 {
+	if conquestEvt.Arrival[HumanOwner] >= math.MaxFloat64 {
 		t.Error("expected conquest event to be reportable (ArrivalYear < MaxFloat64)")
 	}
 	wantArrYear := st.Clock + st.Catalog.Get("proxima").DistFromSol // at c, since comm laser present
-	if math.Abs(conquestEvt.ArrivalYear-wantArrYear) > 1e-9 {
-		t.Errorf("conquest event ArrivalYear=%.6f, want %.6f", conquestEvt.ArrivalYear, wantArrYear)
+	if math.Abs(conquestEvt.Arrival[HumanOwner]-wantArrYear) > 1e-9 {
+		t.Errorf("conquest event ArrivalYear=%.6f, want %.6f", conquestEvt.Arrival[HumanOwner], wantArrYear)
 	}
 }
 
@@ -936,8 +1003,9 @@ func TestConquest_NoCommLaser_NoConquest(t *testing.T) {
 	}
 }
 
-func TestConquest_AlienFleet_NoConquest(t *testing.T) {
+func TestConquest_AlienFleet_Conquers(t *testing.T) {
 	st := newMinimalState()
+	st.Homes[AlienOwner] = "alien-home"
 	st.Clock = 10.0
 	uninhabited := addUninhabitedSystem(st, "proxima", 4.24)
 
@@ -947,8 +1015,8 @@ func TestConquest_AlienFleet_NoConquest(t *testing.T) {
 
 	newConquestEngine(st).processFleetArrivals()
 
-	if uninhabited.Status != StatusUninhabited {
-		t.Errorf("expected Status=uninhabited (alien fleet), got %q", uninhabited.Status)
+	if uninhabited.Status != StatusAlien {
+		t.Errorf("expected Status=alien (alien fleet with comm laser), got %q", uninhabited.Status)
 	}
 }
 
@@ -991,7 +1059,7 @@ func TestConquest_KnownStateUpdatedAfterConquest(t *testing.T) {
 	st.Clock = 20.0
 	st.Propagator.Propagate(st)
 
-	ks := st.SolView.Systems["proxima"]
+	ks := st.Views[HumanOwner].Systems["proxima"]
 	if ks.Status != StatusHuman {
 		t.Errorf("expected SolView Status=human after conquest event applied, got %q", ks.Status)
 	}
@@ -1036,13 +1104,13 @@ func TestSystemHasCommLaser_InTransitNotCounted(t *testing.T) {
 	}
 }
 
-func TestSystemHasCommLaser_AlienFleetNotCounted(t *testing.T) {
+func TestSystemHasCommLaser_AlienFleetCounted(t *testing.T) {
 	st := newMinimalState()
 	sys := st.truth.Systems["alpha-centauri"]
 	addFleet(st, sys, AlienOwner, map[WeaponType]int{WeaponCommLaser: 1})
 
-	if systemHasCommLaser(st.truth, sys) {
-		t.Error("expected false when comm laser is in alien fleet, got true")
+	if !systemHasCommLaser(st.truth, sys) {
+		t.Error("expected true when comm laser is in alien fleet")
 	}
 }
 
@@ -1064,7 +1132,7 @@ func TestExecuteConstruct_CommLaserGoesIntoFleet(t *testing.T) {
 	st := newMinimalState()
 	sys := st.truth.Systems["sol"] // level 5, wealth 1000 — meets MinLevel 4 and cost 64
 
-	ExecuteConstruct(st, sys, WeaponCommLaser, 1)
+	ExecuteConstruct(st, sys, WeaponCommLaser, 1, HumanOwner)
 
 	// Must NOT appear in LocalUnits (comm laser is now mobile).
 	if sys.LocalUnits[WeaponCommLaser] != 0 {

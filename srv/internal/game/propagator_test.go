@@ -10,13 +10,13 @@ import (
 func TestPropagator_ConstructionDone_NonMobile(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 20.0
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.Wealth = 100
 
 	const qty = 3
 	st.Events.Record(&Event{
 		EventYear:   5.0,
-		ArrivalYear: 10.0,
+		Arrival: humanArrival(10.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventConstructionDone,
 		Details:     &ConstructionDetails{WeaponType: WeaponOrbitalDefense, Quantity: qty},
@@ -41,14 +41,14 @@ func TestPropagator_ConstructionDone_MobileExistingFleet(t *testing.T) {
 	st.Clock = 30.0
 	remote := st.truth.Systems["alpha-centauri"]
 	primary := addFleet(st, remote, HumanOwner, map[WeaponType]int{WeaponEscort: 1})
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.Wealth = 200
 
 	const qty = 2
 	const eventYear = 12.0
 	st.Events.Record(&Event{
 		EventYear:   eventYear,
-		ArrivalYear: 16.0,
+		Arrival: humanArrival(16.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventConstructionDone,
 		Details: &ConstructionDetails{
@@ -61,7 +61,7 @@ func TestPropagator_ConstructionDone_MobileExistingFleet(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	kf := st.SolView.Fleet(primary.ID)
+	kf := st.Views[HumanOwner].Fleet(primary.ID)
 	if kf == nil {
 		t.Fatalf("expected KnownFleet %q to exist", primary.ID)
 	}
@@ -87,7 +87,7 @@ func TestPropagator_ConstructionDone_MobileExistingFleet(t *testing.T) {
 func TestPropagator_ConstructionDone_MobileNewFleet(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 40.0
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.Wealth = 200
 	beforeIDs := append([]string(nil), ks.FleetIDs...)
 
@@ -96,7 +96,7 @@ func TestPropagator_ConstructionDone_MobileNewFleet(t *testing.T) {
 
 	st.Events.Record(&Event{
 		EventYear:   15.0,
-		ArrivalYear: 20.0,
+		Arrival: humanArrival(20.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventConstructionDone,
 		Details: &ConstructionDetails{
@@ -109,7 +109,7 @@ func TestPropagator_ConstructionDone_MobileNewFleet(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	kf := st.SolView.Fleet(newFleetID)
+	kf := st.Views[HumanOwner].Fleet(newFleetID)
 	if kf == nil {
 		t.Fatalf("expected new KnownFleet %q to be created", newFleetID)
 	}
@@ -151,7 +151,7 @@ func TestPropagator_FleetDeparted(t *testing.T) {
 
 	st.Events.Record(&Event{
 		EventYear:   10.0,
-		ArrivalYear: 15.0,
+		Arrival: humanArrival(15.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventFleetDeparted,
 		Details: &FleetDepartureDetails{
@@ -169,18 +169,18 @@ func TestPropagator_FleetDeparted(t *testing.T) {
 	st.Propagator.Propagate(st)
 
 	// Source system's FleetIDs should no longer list the fleet.
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	for _, id := range ks.FleetIDs {
 		if id == tf.ID {
 			t.Errorf("source KnownSystem.FleetIDs still contains %q after departure", tf.ID)
 		}
 	}
 	// SolView.Fleets no longer contains the stationed entry.
-	if st.SolView.Fleet(tf.ID) != nil {
+	if st.Views[HumanOwner].Fleet(tf.ID) != nil {
 		t.Errorf("SolView.Fleets still contains %q after departure", tf.ID)
 	}
 	// SolView.InTransit lists the fleet.
-	tr, ok := st.SolView.InTransit[tf.ID]
+	tr, ok := st.Views[HumanOwner].InTransit[tf.ID]
 	if !ok {
 		t.Fatalf("expected SolView.InTransit[%q] after departure", tf.ID)
 	}
@@ -205,7 +205,7 @@ func TestPropagator_CombatOccurred_FleetLostAllUnits(t *testing.T) {
 
 	st.Events.Record(&Event{
 		EventYear:   10.0,
-		ArrivalYear: 14.0,
+		Arrival: humanArrival(14.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventCombatOccurred,
 		Details: &CombatDetails{
@@ -217,10 +217,10 @@ func TestPropagator_CombatOccurred_FleetLostAllUnits(t *testing.T) {
 
 	st.Propagator.Propagate(st)
 
-	if st.SolView.Fleet(tf.ID) != nil {
+	if st.Views[HumanOwner].Fleet(tf.ID) != nil {
 		t.Errorf("expected fleet %q to be removed from SolView.Fleets after losing all units", tf.ID)
 	}
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	for _, id := range ks.FleetIDs {
 		if id == tf.ID {
 			t.Errorf("KnownSystem.FleetIDs still contains %q after fleet wiped out", tf.ID)
@@ -236,12 +236,12 @@ func TestPropagator_CombatOccurred_FleetLostAllUnits(t *testing.T) {
 func TestPropagator_CombatOccurred_NonMobileLosses(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 30.0
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.LocalUnits[WeaponOrbitalDefense] = 5
 
 	st.Events.Record(&Event{
 		EventYear:   10.0,
-		ArrivalYear: 14.0,
+		Arrival: humanArrival(14.0),
 		SystemID:    "alpha-centauri",
 		Type:        EventCombatOccurred,
 		Details: &CombatDetails{
@@ -267,13 +267,13 @@ func TestPropagator_SystemCaptured(t *testing.T) {
 
 	st.Events.Record(&Event{
 		EventYear:   5,
-		ArrivalYear: 10,
+		Arrival: humanArrival(10),
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemCaptured,
 	})
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusAlien {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusAlien {
 		t.Errorf("Status=%q, want alien", got)
 	}
 }
@@ -282,17 +282,17 @@ func TestPropagator_SystemCaptured(t *testing.T) {
 func TestPropagator_SystemRetaken(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 20.0
-	st.SolView.Systems["alpha-centauri"].Status = StatusAlien
+	st.Views[HumanOwner].Systems["alpha-centauri"].Status = StatusAlien
 
 	st.Events.Record(&Event{
 		EventYear:   5,
-		ArrivalYear: 10,
+		Arrival: humanArrival(10),
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemRetaken,
 	})
 	st.Propagator.Propagate(st)
 
-	if got := st.SolView.Systems["alpha-centauri"].Status; got != StatusHuman {
+	if got := st.Views[HumanOwner].Systems["alpha-centauri"].Status; got != StatusHuman {
 		t.Errorf("Status=%q, want human", got)
 	}
 }
@@ -302,14 +302,14 @@ func TestPropagator_SystemRetaken(t *testing.T) {
 func TestPropagator_SystemConquered(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 20.0
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.Status = StatusUninhabited
 	ks.EconLevel = 4
 	ks.Wealth = 99
 
 	st.Events.Record(&Event{
 		EventYear:   5,
-		ArrivalYear: 10,
+		Arrival: humanArrival(10),
 		SystemID:    "alpha-centauri",
 		Type:        EventSystemConquered,
 	})
@@ -330,12 +330,12 @@ func TestPropagator_SystemConquered(t *testing.T) {
 func TestPropagator_EconGrowth(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 20.0
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.EconLevel = 2
 
 	st.Events.Record(&Event{
 		EventYear:   5,
-		ArrivalYear: 10,
+		Arrival: humanArrival(10),
 		SystemID:    "alpha-centauri",
 		Type:        EventEconGrowth,
 		Details:     &EconGrowthDetails{NewLevel: 3},
@@ -353,7 +353,7 @@ func TestPropagator_EconGrowth(t *testing.T) {
 func TestPropagator_CommandEventsAdvanceAsOfYearOnly(t *testing.T) {
 	st := newMinimalState()
 	st.Clock = 20.0
-	ks := st.SolView.Systems["alpha-centauri"]
+	ks := st.Views[HumanOwner].Systems["alpha-centauri"]
 	ks.Status = StatusHuman
 	ks.EconLevel = 3
 	ks.Wealth = 50
@@ -361,7 +361,7 @@ func TestPropagator_CommandEventsAdvanceAsOfYearOnly(t *testing.T) {
 
 	st.Events.Record(&Event{
 		EventYear:   8,
-		ArrivalYear: 12,
+		Arrival: humanArrival(12),
 		SystemID:    "alpha-centauri",
 		Type:        EventCommandExecuted,
 	})
