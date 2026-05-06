@@ -13,30 +13,76 @@ import (
 	"strings"
 )
 
-// Initialize loads nearest.csv and planets.csv, builds and returns the initial
-// GameState. (FR-005 through FR-010)
+// Initialize loads all four CSV files and builds the initial symmetric GameState.
+// (FR-004–FR-010, FR-17, FR-29, FR-31, FR-74)
 //
-// rng is injected (DR-11) so tests can seed deterministically. main.go passes
-// a time-seeded RNG to preserve current default behavior.
-func Initialize(rng *rand.Rand, nearestCSVPath, planetsCSVPath string) (*GameState, error) {
+// rng is injected (DR-11) so tests can seed deterministically.
+func Initialize(rng *rand.Rand, nearestCSVPath, planetsCSVPath, alienNearestCSVPath, alienPlanetsCSVPath string) (*GameState, error) {
+	// Load human CSV files.
 	hasPlanets, err := loadPlanets(planetsCSVPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading %s: %w", planetsCSVPath, err)
 	}
-
-	groups, maxDist, err := loadStars(nearestCSVPath, hasPlanets)
+	humanGroups, humanMaxDist, err := loadStars(nearestCSVPath, hasPlanets)
 	if err != nil {
 		return nil, fmt.Errorf("loading %s: %w", nearestCSVPath, err)
 	}
-	if len(groups) == 0 {
-		return nil, fmt.Errorf("nearest.csv: no usable star records")
+
+	// Load alien CSV files.
+	alienHasPlanets, err := loadPlanets(alienPlanetsCSVPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", alienPlanetsCSVPath, err)
+	}
+	alienGroups, _, err := loadStars(alienNearestCSVPath, alienHasPlanets)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", alienNearestCSVPath, err)
 	}
 
-	// 1. Build the immutable star catalog.
-	entries := make([]*CatalogEntry, 0, len(groups))
-	for _, g := range groups {
+	// Locate alien home group by display name match.
+	alienHomeIdx := -1
+	for i, g := range alienGroups {
+		if strings.Contains(g.DisplayName, AlienHomeDisplayName) {
+			alienHomeIdx = i
+			break
+		}
+	}
+	if alienHomeIdx < 0 {
+		return nil, fmt.Errorf("alien home %q not found in %s", AlienHomeDisplayName, alienNearestCSVPath)
+	}
+	alienHome := alienGroups[alienHomeIdx]
+	alienHomeID := toSystemID(alienHome.DisplayName)
+
+	// Recompute DistFromSol in alien groups as distance from the alien home
+	// (needed for the "inner sphere" colonization threshold). (FR-006)
+	alienMaxDist := 0.0
+	for i := range alienGroups {
+		g := &alienGroups[i]
+		dx := g.X - alienHome.X
+		dy := g.Y - alienHome.Y
+		dz := g.Z - alienHome.Z
+		g.DistFromSol = math.Sqrt(dx*dx + dy*dy + dz*dz)
+		if g.DistFromSol > alienMaxDist {
+			alienMaxDist = g.DistFromSol
+		}
+	}
+
+	// Dup-ID detection: fail fast if any alien system ID collides with a human one.
+	humanIDs := map[string]bool{}
+	for _, g := range humanGroups {
+		humanIDs[toSystemID(g.DisplayName)] = true
+	}
+	for _, g := range alienGroups {
 		id := toSystemID(g.DisplayName)
-		entries = append(entries, &CatalogEntry{
+		if humanIDs[id] {
+			return nil, fmt.Errorf("duplicate system ID %q in both human and alien CSV", id)
+		}
+	}
+
+	// Build the unified immutable star catalog from both group sets.
+	allEntries := make([]*CatalogEntry, 0, len(humanGroups)+len(alienGroups))
+	for _, g := range humanGroups {
+		id := toSystemID(g.DisplayName)
+		allEntries = append(allEntries, &CatalogEntry{
 			ID:          id,
 			DisplayName: g.DisplayName,
 			X:           g.X,
@@ -47,162 +93,167 @@ func Initialize(rng *rand.Rand, nearestCSVPath, planetsCSVPath string) (*GameSta
 			IsSol:       g.IsSol,
 		})
 	}
-	catalog := NewStarCatalog(entries)
+	for _, g := range alienGroups {
+		id := toSystemID(g.DisplayName)
+		allEntries = append(allEntries, &CatalogEntry{
+			ID:          id,
+			DisplayName: g.DisplayName,
+			X:           g.X,
+			Y:           g.Y,
+			Z:           g.Z,
+			DistFromSol: g.DistFromSol,
+			HasPlanets:  g.HasPlanets,
+			IsSol:       false,
+		})
+	}
+	catalog := NewStarCatalog(allEntries)
 
-	// 2. Build ground truth and the initial player view.
+	// Build ground truth and per-player views.
 	truth := &Truth{
-		Systems: make(map[string]*TrueSystem, len(entries)),
+		Systems: make(map[string]*TrueSystem, len(allEntries)),
 		Fleets:  map[string]*TrueFleet{},
 	}
-	view := &SolView{
-		Systems:   make(map[string]*KnownSystem, len(entries)),
+	humanView := &PlayerView{
+		Systems:   make(map[string]*KnownSystem, len(allEntries)),
+		Fleets:    map[string]*KnownFleet{},
+		InTransit: map[string]*KnownTransit{},
+	}
+	alienView := &PlayerView{
+		Systems:   make(map[string]*KnownSystem, len(allEntries)),
 		Fleets:    map[string]*KnownFleet{},
 		InTransit: map[string]*KnownTransit{},
 	}
 
 	state := &GameState{
-		Catalog:     catalog,
-		truth:       truth,
-		SolView:     view,
-		Events:      NewEventLog(),
+		Catalog: catalog,
+		truth:   truth,
+		Views:   map[Owner]*PlayerView{HumanOwner: humanView, AlienOwner: alienView},
+		Events:  NewEventLog(),
+		Factions: map[Owner]*Faction{
+			HumanOwner: {},
+			AlienOwner: {},
+		},
+		Homes:       map[Owner]string{HumanOwner: "sol", AlienOwner: alienHomeID},
 		PendingCmds: []*PendingCommand{},
 		rng:         rng,
 	}
 
-	// 3. Populate Truth and seed SolView from initial Truth (G-4).
-	for _, g := range groups {
+	// Seed human systems and both views from truth (FR-017). (FR-004–FR-007)
+	for _, g := range humanGroups {
 		id := toSystemID(g.DisplayName)
-		isSol := g.IsSol
+		ts := &TrueSystem{ID: id, LocalUnits: map[WeaponType]int{}}
 
-		ts := &TrueSystem{
-			ID:         id,
-			LocalUnits: map[WeaponType]int{},
-		}
-
-		// Determine initial status (FR-006, FR-007)
-		if isSol {
+		if g.IsSol {
 			ts.Status = StatusHuman
-			ts.EconLevel = 4
+			ts.EconLevel = 5
 			ts.Wealth = 64
-			ts.EconGrowthYear = EconGrowthIntervalYears // Sol already at max; won't grow
+			ts.EconGrowthYear = EconGrowthIntervalYears
 			ts.LocalUnits[WeaponCommLaser] = 1
-		} else if g.HasPlanets {
+			loaderSeedFleet(state, truth, ts, HumanOwner, g.DisplayName, humanView, alienView)
+		} else if g.HasPlanets || g.DistFromSol <= humanMaxDist/2.0 {
 			ts.Status = StatusHuman
 			ts.EconLevel = gaussianEconLevel(rng)
 			ts.EconGrowthYear = EconGrowthIntervalYears
-		} else if g.DistFromSol <= maxDist/2.0 {
-			ts.Status = StatusHuman
-			ts.EconLevel = gaussianEconLevel(rng)
-			ts.EconGrowthYear = EconGrowthIntervalYears
+			if g.HasPlanets {
+				ts.LocalUnits[WeaponCommLaser] = 1
+			}
+			loaderSeedFleet(state, truth, ts, HumanOwner, g.DisplayName, humanView, alienView)
 		} else {
 			ts.Status = StatusUninhabited
 			ts.EconLevel = 0
 		}
 
-		// Tuned for gameplay balance: every human-held system starts with two
-		// Reporter ships and (if it has planets) a Comm Laser.
-		if ts.Status == StatusHuman {
-			fid := state.NewFleetID()
-			fname := g.DisplayName + "-1st Fleet"
-			tf := &TrueFleet{
-				ID:         fid,
-				Name:       fname,
-				Owner:      HumanOwner,
-				Units:      map[WeaponType]int{WeaponReporter: 2},
-				LocationID: id,
-				InTransit:  false,
-			}
-			truth.Fleets[fid] = tf
-			ts.FleetIDs = append(ts.FleetIDs, fid)
-			ts.PrimaryFleetID = fid
-			ts.FleetCount = 1
+		truth.Systems[id] = ts
+		loaderMirrorSystem(ts, humanView, alienView)
 
+		if ts.Status == StatusHuman {
+			state.Factions[HumanOwner].InitialSystemIDs = append(
+				state.Factions[HumanOwner].InitialSystemIDs, id)
+		}
+	}
+
+	// Seed alien systems and both views from truth. (FR-004–FR-007)
+	for _, g := range alienGroups {
+		id := toSystemID(g.DisplayName)
+		ts := &TrueSystem{ID: id, LocalUnits: map[WeaponType]int{}}
+
+		if id == alienHomeID {
+			ts.Status = StatusAlien
+			ts.EconLevel = 5
+			ts.Wealth = 64
+			ts.EconGrowthYear = EconGrowthIntervalYears
+			ts.LocalUnits[WeaponCommLaser] = 1
+			loaderSeedFleet(state, truth, ts, AlienOwner, g.DisplayName, humanView, alienView)
+		} else if g.HasPlanets || g.DistFromSol <= alienMaxDist/2.0 {
+			ts.Status = StatusAlien
+			ts.EconLevel = gaussianEconLevel(rng)
+			ts.EconGrowthYear = EconGrowthIntervalYears
 			if g.HasPlanets {
 				ts.LocalUnits[WeaponCommLaser] = 1
 			}
-
-			// Mirror the human fleet into SolView as a snapshot (DR-4).
-			view.Fleets[fid] = &KnownFleet{
-				ID:         fid,
-				Name:       fname,
-				Owner:      HumanOwner,
-				Units:      copyUnits(tf.Units),
-				LocationID: id,
-				AsOfYear:   0,
-			}
+			loaderSeedFleet(state, truth, ts, AlienOwner, g.DisplayName, humanView, alienView)
+		} else {
+			ts.Status = StatusUninhabited
+			ts.EconLevel = 0
 		}
 
 		truth.Systems[id] = ts
+		loaderMirrorSystem(ts, humanView, alienView)
 
-		// Seed SolView from initial Truth (G-4): the player's pre-game view
-		// matches ground truth, EXCEPT alien presence will be added below
-		// without updating the view (FR-010).
-		ks := &KnownSystem{
-			ID:         id,
-			Status:     ts.Status,
-			AsOfYear:   0,
-			EconLevel:  ts.EconLevel,
-			Wealth:     ts.Wealth,
-			LocalUnits: copyUnits(ts.LocalUnits),
-			FleetIDs:   append([]string(nil), ts.FleetIDs...),
-		}
-		view.Systems[id] = ks
-	}
-
-	// Record initial human systems for win condition (FR-056)
-	for id, sys := range truth.Systems {
-		if sys.Status == StatusHuman {
-			state.Human.InitialSystemIDs = append(state.Human.InitialSystemIDs, id)
+		if ts.Status == StatusAlien {
+			state.Factions[AlienOwner].InitialSystemIDs = append(
+				state.Factions[AlienOwner].InitialSystemIDs, id)
 		}
 	}
-
-	// 4. Select alien entry points from peripheral systems (FR-009, A-2).
-	var peripheral []string
-	for id, sys := range truth.Systems {
-		_ = sys
-		e := catalog.Get(id)
-		if e != nil && e.DistFromSol > PeripheryFraction*maxDist {
-			peripheral = append(peripheral, id)
-		}
-	}
-	rng.Shuffle(len(peripheral), func(i, j int) { peripheral[i], peripheral[j] = peripheral[j], peripheral[i] })
-
-	count := AlienEntryCount
-	if count > len(peripheral) {
-		log.Printf("warning: only %d peripheral systems available for %d alien entry points", len(peripheral), count)
-		count = len(peripheral)
-	}
-
-	for i := 0; i < count; i++ {
-		epID := peripheral[i]
-		ts := truth.Systems[epID]
-		state.Alien.EntryPointIDs = append(state.Alien.EntryPointIDs, epID)
-
-		// Place initial alien fleet at entry point (G-1)
-		fleetID := state.NewFleetID()
-		fleetName := state.NewFleetName()
-		tf := &TrueFleet{
-			ID:         fleetID,
-			Name:       fleetName,
-			Owner:      AlienOwner,
-			Units:      copyUnits(AlienInitialComposition),
-			LocationID: epID,
-			InTransit:  false,
-		}
-		truth.Fleets[fleetID] = tf
-		ts.FleetIDs = append(ts.FleetIDs, fleetID)
-
-		// Ground truth: system is alien-held. SolView intentionally NOT updated
-		// — player doesn't know about aliens yet (FR-010). The SolView entry
-		// retains its pre-alien Status (StatusUninhabited or StatusHuman as
-		// determined above, before we overwrite ts.Status here).
-		ts.Status = StatusAlien
-		ts.EconLevel = 0
-	}
-
-	state.Alien.NextSpawnYear = AlienSpawnIntervalYears
 
 	return state, nil
+}
+
+// loaderSeedFleet creates an initial 2-reporter fleet at ts and mirrors it
+// into both player views. (FR-005)
+func loaderSeedFleet(state *GameState, truth *Truth, ts *TrueSystem, owner Owner, displayName string, views ...*PlayerView) {
+	fid := state.NewFleetID()
+	fname := displayName + "-1st Fleet"
+	tf := &TrueFleet{
+		ID:         fid,
+		Name:       fname,
+		Owner:      owner,
+		Units:      map[WeaponType]int{WeaponReporter: 2},
+		LocationID: ts.ID,
+		InTransit:  false,
+	}
+	truth.Fleets[fid] = tf
+	ts.FleetIDs = append(ts.FleetIDs, fid)
+	ts.PrimaryFleetID = fid
+	ts.FleetCount = 1
+
+	kf := &KnownFleet{
+		ID:         fid,
+		Name:       fname,
+		Owner:      owner,
+		Units:      copyUnits(tf.Units),
+		LocationID: ts.ID,
+		AsOfYear:   0,
+	}
+	for _, v := range views {
+		v.Fleets[fid] = kf
+	}
+}
+
+// loaderMirrorSystem adds a KnownSystem snapshot of ts to each view. (FR-017)
+func loaderMirrorSystem(ts *TrueSystem, views ...*PlayerView) {
+	ks := &KnownSystem{
+		ID:         ts.ID,
+		Status:     ts.Status,
+		AsOfYear:   0,
+		EconLevel:  ts.EconLevel,
+		Wealth:     ts.Wealth,
+		LocalUnits: copyUnits(ts.LocalUnits),
+		FleetIDs:   append([]string(nil), ts.FleetIDs...),
+	}
+	for _, v := range views {
+		v.Systems[ts.ID] = ks
+	}
 }
 
 // --- CSV loading helpers ---

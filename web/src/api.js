@@ -11,13 +11,13 @@ export class APIClient {
     }
 
     async fetchState() {
-        const r = await fetch('/api/state')
+        const r = await fetch('/api/state?player=human')
         if (!r.ok) throw new Error(`/api/state: ${r.status}`)
         return r.json()
     }
 
     async sendCommand(cmd) {
-        const r = await fetch('/api/command', {
+        const r = await fetch('/api/command?player=human', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cmd),
@@ -33,7 +33,7 @@ export class APIClient {
     }
 
     async setPaused(paused) {
-        const r = await fetch('/api/pause', {
+        const r = await fetch('/api/pause?player=human', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paused }),
@@ -43,7 +43,7 @@ export class APIClient {
     }
 
     connectSSE() {
-        this.es = new EventSource('/api/events')
+        this.es = new EventSource('/api/events?player=human')
 
         this.es.addEventListener('connected', e => {
             // Full state snapshot on (re)connect; re-sync in case we missed events.

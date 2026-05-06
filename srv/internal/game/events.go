@@ -8,69 +8,82 @@ import (
 	"sync"
 )
 
-// EventManager manages the SSE client registry and broadcasts events.
+// EventManager manages the per-player SSE client registry and broadcasts events.
 // Maturation/apply logic lives in Propagator; EventManager is plumbing.
+// (FR-43, FR-42, FR-47)
 type EventManager struct {
-	mu      sync.Mutex
-	clients map[string]chan []byte // key: client ID, value: buffered channel
+	mu       sync.Mutex
+	byPlayer map[Owner]map[string]chan []byte // player → clientID → channel
 }
 
 // NewEventManager creates a ready-to-use EventManager.
 func NewEventManager() *EventManager {
 	return &EventManager{
-		clients: make(map[string]chan []byte),
+		byPlayer: map[Owner]map[string]chan []byte{
+			HumanOwner: {},
+			AlienOwner: {},
+		},
 	}
 }
 
-// Register adds an SSE client. Returns a receive-only channel that receives
-// SSE-formatted frames (already formatted as "event: ...\ndata: ...\n\n").
-func (m *EventManager) Register(clientID string) <-chan []byte {
+// Register adds an SSE client for the given player. Returns a receive-only
+// channel carrying SSE-formatted frames.
+func (m *EventManager) Register(player Owner, clientID string) <-chan []byte {
 	ch := make(chan []byte, 64)
 	m.mu.Lock()
-	m.clients[clientID] = ch
+	if m.byPlayer[player] == nil {
+		m.byPlayer[player] = map[string]chan []byte{}
+	}
+	m.byPlayer[player][clientID] = ch
 	m.mu.Unlock()
 	return ch
 }
 
 // Unregister removes a disconnected SSE client and closes its channel.
-func (m *EventManager) Unregister(clientID string) {
+// Returns the player the client belonged to, and whether that player now has
+// zero remaining clients (so the caller can drive OnPlayerDisconnected).
+func (m *EventManager) Unregister(clientID string) (player Owner, wasLast bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if ch, ok := m.clients[clientID]; ok {
-		close(ch)
-		delete(m.clients, clientID)
+	for p, clients := range m.byPlayer {
+		if ch, ok := clients[clientID]; ok {
+			close(ch)
+			delete(clients, clientID)
+			return p, len(clients) == 0
+		}
 	}
+	return "", false
 }
 
-// broadcastEvent emits a single matured event as an SSE "game_event" frame.
+// broadcastEvent emits a single matured event as an SSE "game_event" frame
+// to all clients registered under player.
 // Called by Propagator.Propagate; caller holds state.mu.
-func (m *EventManager) broadcastEvent(evt *Event) {
-	payload := sseFrame("game_event", eventToMap(evt))
-	m.broadcastBytes(payload)
+func (m *EventManager) broadcastEvent(player Owner, evt *Event) {
+	payload := sseFrame("game_event", eventToMap(player, evt))
+	m.broadcastToPlayer(player, payload)
 }
 
 // broadcastSystemUpdate emits an SSE "system_update" frame for the given
-// system, sourced from SolView (or Sol's ground truth for "sol"). Called
-// by Propagator.Propagate; caller holds state.mu.
-func (m *EventManager) broadcastSystemUpdate(state *GameState, sysID string) {
+// system, sourced from the player's view.
+// Called by Propagator.Propagate; caller holds state.mu.
+func (m *EventManager) broadcastSystemUpdate(player Owner, state *GameState, sysID string) {
 	if sysID == "" {
 		return
 	}
-	if _, ok := state.SolView.Systems[sysID]; !ok && sysID != "sol" {
+	if _, ok := state.Views[player].Systems[sysID]; !ok && sysID != state.Homes[player] {
 		return
 	}
-	payload := sseFrame("system_update", systemToMap(state, sysID))
-	m.broadcastBytes(payload)
+	payload := sseFrame("system_update", systemToMap(player, state, sysID))
+	m.broadcastToPlayer(player, payload)
 }
 
-// BroadcastClockSync sends a clock synchronisation event to all registered clients.
-// Safe to call with state.mu held (reads only clock and paused).
+// BroadcastClockSync sends a clock sync event to all registered clients (both players).
 func (m *EventManager) BroadcastClockSync(state *GameState) {
 	payload := sseFrame("clock_sync", map[string]interface{}{
 		"gameYear": state.Clock,
 		"paused":   state.Paused,
 	})
-	m.broadcastBytes(payload)
+	m.broadcastAll(payload)
 }
 
 // BroadcastGameOver sends the game-over event to all registered clients.
@@ -79,31 +92,43 @@ func (m *EventManager) BroadcastGameOver(winner Owner, reason string) {
 		"winner": string(winner),
 		"reason": reason,
 	})
-	m.broadcastBytes(payload)
+	m.broadcastAll(payload)
 }
 
-// BroadcastConnected sends the full current state snapshot to a single client
-// (called when the client first connects). state.mu must be held by caller.
-func (m *EventManager) BroadcastConnected(clientID string, state *GameState) {
+// BroadcastConnected sends the full current state snapshot to a single client.
+// player is the owner of clientID. state.mu must be held by caller.
+func (m *EventManager) BroadcastConnected(player Owner, clientID string, state *GameState) {
 	m.mu.Lock()
-	ch, ok := m.clients[clientID]
+	clients := m.byPlayer[player]
+	ch, ok := clients[clientID]
 	m.mu.Unlock()
 	if !ok {
 		return
 	}
-	payload := sseFrame("connected", fullStateMap(state))
+	payload := sseFrame("connected", fullStateMap(player, state))
 	safeSend(ch, payload)
 }
 
-// broadcastBytes sends payload to all registered client channels.
-// If a client channel is full, the payload is dropped for that client.
-// If sending to a closed channel panics, the client is unregistered.
-func (m *EventManager) broadcastBytes(payload []byte) {
+// broadcastToPlayer sends payload to all clients registered under player.
+func (m *EventManager) broadcastToPlayer(player Owner, payload []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for id, ch := range m.clients {
+	for id, ch := range m.byPlayer[player] {
 		if !safeSend(ch, payload) {
 			log.Printf("events: client %s channel full or closed, dropping event", id)
+		}
+	}
+}
+
+// broadcastAll sends payload to all registered clients regardless of player.
+func (m *EventManager) broadcastAll(payload []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, clients := range m.byPlayer {
+		for id, ch := range clients {
+			if !safeSend(ch, payload) {
+				log.Printf("events: client %s channel full or closed, dropping event", id)
+			}
 		}
 	}
 }
@@ -135,11 +160,11 @@ func sseFrame(eventType string, data interface{}) []byte {
 	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(b)))
 }
 
-// eventToMap converts an Event to a map suitable for JSON encoding.
-func eventToMap(evt *Event) map[string]interface{} {
+// eventToMap converts an Event to a map suitable for JSON encoding for player.
+func eventToMap(player Owner, evt *Event) map[string]interface{} {
 	m := map[string]interface{}{
 		"id":          evt.ID,
-		"arrivalYear": evt.ArrivalYear,
+		"arrivalYear": evt.Arrival[player],
 		"systemId":    evt.SystemID,
 		"type":        string(evt.Type),
 		"description": evt.Description,
@@ -151,16 +176,16 @@ func eventToMap(evt *Event) map[string]interface{} {
 }
 
 // systemToMap returns the player-visible map for one system, sourced from
-// SolView (or, for sol, the single ReadSolGroundTruth() escape hatch).
-func systemToMap(state *GameState, sysID string) map[string]interface{} {
+// the player's view (or the home ground-truth for the home system).
+func systemToMap(player Owner, state *GameState, sysID string) map[string]interface{} {
 	cat := state.Catalog.Get(sysID)
 	displayName := sysID
 	if cat != nil {
 		displayName = cat.DisplayName
 	}
 
-	if sysID == "sol" {
-		gt := state.ReadSolGroundTruth()
+	if sysID == state.Homes[player] {
+		gt := state.ReadHomeGroundTruth(player)
 		return map[string]interface{}{
 			"systemId":        sysID,
 			"displayName":     displayName,
@@ -169,11 +194,11 @@ func systemToMap(state *GameState, sysID string) map[string]interface{} {
 			"knownEconLevel":  gt.EconLevel,
 			"knownWealth":     gt.Wealth,
 			"knownLocalUnits": unitsToStringMap(gt.LocalUnits),
-			"knownFleets":     buildKnownFleetsForSol(state, gt.FleetIDs),
+			"knownFleets":     buildKnownFleetsForView(player, state, gt.FleetIDs),
 		}
 	}
 
-	ks := state.SolView.System(sysID)
+	ks := state.Views[player].System(sysID)
 	if ks == nil {
 		return map[string]interface{}{
 			"systemId":        sysID,
@@ -191,29 +216,22 @@ func systemToMap(state *GameState, sysID string) map[string]interface{} {
 		"knownEconLevel":  ks.EconLevel,
 		"knownWealth":     ks.Wealth,
 		"knownLocalUnits": unitsToStringMap(ks.LocalUnits),
-		"knownFleets":     buildKnownFleetsForView(state, ks.FleetIDs),
+		"knownFleets":     buildKnownFleetsForView(player, state, ks.FleetIDs),
 	}
 }
 
-// buildKnownFleetsForView returns the player-visible human-fleet map list
-// for a non-sol system, reading snapshots from SolView.Fleets.
-func buildKnownFleetsForView(state *GameState, fleetIDs []string) []map[string]interface{} {
+// buildKnownFleetsForView returns the player-visible fleet map list for a
+// system, reading snapshots from the player's view.
+func buildKnownFleetsForView(player Owner, state *GameState, fleetIDs []string) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(fleetIDs))
 	for _, fid := range fleetIDs {
-		f := state.SolView.Fleet(fid)
-		if f == nil || f.Owner != HumanOwner {
+		f := state.Views[player].Fleet(fid)
+		if f == nil {
 			continue
 		}
 		result = append(result, knownFleetToMap(f))
 	}
 	return result
-}
-
-// buildKnownFleetsForSol returns Sol's fleet list. Sol's fleets are mirrored
-// into SolView.Fleets at construction time (events at sol mature in the same
-// tick they are recorded), so we can read from SolView like any other system.
-func buildKnownFleetsForSol(state *GameState, fleetIDs []string) []map[string]interface{} {
-	return buildKnownFleetsForView(state, fleetIDs)
 }
 
 // knownFleetToMap converts a stationed KnownFleet to its SSE/DTO map.
@@ -231,8 +249,7 @@ func knownFleetToMap(f *KnownFleet) map[string]interface{} {
 	}
 }
 
-// transitToMap converts a KnownTransit (in-flight fleet known to Sol) to its
-// SSE/DTO map.
+// transitToMap converts a KnownTransit (in-flight fleet) to its SSE/DTO map.
 func transitToMap(t *KnownTransit) map[string]interface{} {
 	return map[string]interface{}{
 		"id":            t.FleetID,
@@ -258,22 +275,20 @@ func unitsToStringMap(m map[WeaponType]int) map[string]int {
 	return out
 }
 
-// pendingCommandToMap converts a PendingCommand to a map for JSON encoding,
-// including a server-formed hover description.
-func pendingCommandToMap(state *GameState, cmd *PendingCommand) map[string]interface{} {
+// pendingCommandToMap converts a PendingCommand to a map for JSON encoding.
+func pendingCommandToMap(player Owner, state *GameState, cmd *PendingCommand) map[string]interface{} {
 	return map[string]interface{}{
 		"id":          cmd.ID,
 		"type":        string(cmd.Type),
 		"originId":    cmd.OriginID,
 		"targetId":    cmd.TargetID,
 		"executeYear": cmd.ExecuteYear,
-		"description": describePendingCommandLocal(state, cmd),
+		"description": describePendingCommandLocal(player, state, cmd),
 	}
 }
 
 // describePendingCommandLocal formats hover text for an in-flight command.
-// Reads display names from Catalog and fleet names from SolView.
-func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
+func describePendingCommandLocal(player Owner, state *GameState, cmd *PendingCommand) string {
 	targetName := cmd.TargetID
 	if e := state.Catalog.Get(cmd.TargetID); e != nil {
 		targetName = e.DisplayName
@@ -284,7 +299,7 @@ func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
 			cmd.Quantity, cmd.WeaponType, targetName, cmd.ExecuteYear)
 	case CmdMove:
 		fleetName := cmd.FleetID
-		if f := state.SolView.Fleet(cmd.FleetID); f != nil {
+		if f := state.Views[player].Fleet(cmd.FleetID); f != nil {
 			fleetName = f.Name
 		}
 		destName := cmd.DestID
@@ -300,13 +315,11 @@ func describePendingCommandLocal(state *GameState, cmd *PendingCommand) string {
 }
 
 // fullStateMap builds the initial full-state snapshot for a newly connected client.
-// (handleEvents uses this for the "connected" SSE event.)
-func fullStateMap(state *GameState) map[string]interface{} {
+func fullStateMap(player Owner, state *GameState) map[string]interface{} {
 	systems := make([]map[string]interface{}, 0, len(state.Catalog.Order))
 	for _, id := range state.Catalog.Order {
 		cat := state.Catalog.Get(id)
-		entry := systemToMap(state, id)
-		// Augment with static catalog fields used by the connected snapshot.
+		entry := systemToMap(player, state, id)
 		entry["displayName"] = cat.DisplayName
 		entry["x"] = cat.X
 		entry["y"] = cat.Y
@@ -320,42 +333,41 @@ func fullStateMap(state *GameState) map[string]interface{} {
 
 	events := make([]map[string]interface{}, 0)
 	for _, evt := range state.Events.All {
-		if !evt.Broadcast {
+		if !evt.Broadcast[player] {
 			continue
 		}
 		if evt.Internal {
 			continue
 		}
-		if evt.ArrivalYear > state.Clock || evt.ArrivalYear >= math.MaxFloat64 {
+		arrival := evt.Arrival[player]
+		if arrival > state.Clock || arrival >= math.MaxFloat64 {
 			continue
 		}
-		events = append(events, eventToMap(evt))
+		events = append(events, eventToMap(player, evt))
 	}
 
 	pendingCommands := make([]map[string]interface{}, 0, len(state.PendingCmds))
 	for _, cmd := range state.PendingCmds {
-		if cmd.IsBot {
+		if cmd.Issuer != player {
 			continue
 		}
-		pendingCommands = append(pendingCommands, pendingCommandToMap(state, cmd))
+		pendingCommands = append(pendingCommands, pendingCommandToMap(player, state, cmd))
 	}
 
 	inTransit := make([]map[string]interface{}, 0)
-	for _, t := range state.SolView.InTransit {
-		if t.Owner == HumanOwner {
-			inTransit = append(inTransit, transitToMap(t))
-		}
+	for _, t := range state.Views[player].InTransit {
+		inTransit = append(inTransit, transitToMap(t))
 	}
 
 	return map[string]interface{}{
-		"gameYear":             state.Clock,
-		"paused":               state.Paused,
-		"gameOver":             state.GameOver,
-		"winner":               string(state.Winner),
-		"winReason":            state.WinReason,
-		"systems":              systems,
-		"events":               events,
-		"pendingCommands":      pendingCommands,
-		"humanFleetsInTransit": inTransit,
+		"gameYear":        state.Clock,
+		"paused":          state.Paused,
+		"gameOver":        state.GameOver,
+		"winner":          string(state.Winner),
+		"winReason":       state.WinReason,
+		"systems":         systems,
+		"events":          events,
+		"pendingCommands": pendingCommands,
+		"fleetsInTransit": inTransit,
 	}
 }

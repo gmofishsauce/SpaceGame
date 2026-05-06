@@ -34,8 +34,8 @@ func TestProperty_ReplayMatchesEngineSolView(t *testing.T) {
 	// move. All target the remote system so the events propagate at
 	// finite speed.
 	cmds := []*PendingCommand{
-		{TargetID: "remote", Type: CmdConstruct, WeaponType: WeaponOrbitalDefense, Quantity: 2},
-		{TargetID: "remote", Type: CmdConstruct, WeaponType: WeaponBattleship, Quantity: 1},
+		{TargetID: "remote", Type: CmdConstruct, WeaponType: WeaponOrbitalDefense, Quantity: 2, Issuer: HumanOwner},
+		{TargetID: "remote", Type: CmdConstruct, WeaponType: WeaponBattleship, Quantity: 1, Issuer: HumanOwner},
 	}
 	for _, c := range cmds {
 		if _, _, err := e.EnqueueCommand(c); err != nil {
@@ -44,7 +44,7 @@ func TestProperty_ReplayMatchesEngineSolView(t *testing.T) {
 	}
 
 	// Snapshot the initial SolView before any events propagate.
-	initialView := cloneSolView(st.SolView)
+	initialView := cloneSolView(st.Views[HumanOwner])
 
 	// Run for ~50 game-years. With CommandSpeedC=1 and dist=5, commands
 	// arrive at year 5 and reports return to Sol by year 10; well within
@@ -69,6 +69,7 @@ func TestProperty_ReplayMatchesEngineSolView(t *testing.T) {
 		Type:     CmdMove,
 		FleetID:  primaryFleetID,
 		DestID:   "sol",
+		Issuer:   HumanOwner,
 	}
 	if _, _, err := e.EnqueueCommand(moveCmd); err != nil {
 		t.Fatalf("EnqueueCommand(move): %v", err)
@@ -79,7 +80,7 @@ func TestProperty_ReplayMatchesEngineSolView(t *testing.T) {
 	tickUntil(t, st, e, 80.0)
 
 	// Engine final SolView.
-	engineView := st.SolView
+	engineView := st.Views[HumanOwner]
 
 	// Replay broadcast events into a clean SolView starting from the
 	// snapshotted initial state. Sort by ArrivalYear with a stable
@@ -90,17 +91,17 @@ func TestProperty_ReplayMatchesEngineSolView(t *testing.T) {
 	// record sequence under a fixed RNG).
 	events := append([]*Event(nil), st.Events.All...)
 	sort.SliceStable(events, func(i, j int) bool {
-		return events[i].ArrivalYear < events[j].ArrivalYear
+		return events[i].Arrival[HumanOwner] < events[j].Arrival[HumanOwner]
 	})
 
 	replayView := cloneSolView(initialView)
 	prop := NewPropagator(NewEventManager())
 	applied := 0
 	for _, evt := range events {
-		if !evt.Broadcast {
+		if !evt.Broadcast[HumanOwner] {
 			continue
 		}
-		prop.applyEventToView(replayView, st.Catalog, evt)
+		prop.applyEventToView(replayView, st.Catalog, evt, HumanOwner)
 		applied++
 	}
 	if applied == 0 {
@@ -118,11 +119,11 @@ func TestProperty_ReplayMatchesEngineSolView(t *testing.T) {
 
 // cloneSolView returns a deep copy of v. All pointed-to substructure is
 // fresh; mutating the clone does not affect the original.
-func cloneSolView(v *SolView) *SolView {
+func cloneSolView(v *PlayerView) *PlayerView {
 	if v == nil {
 		return nil
 	}
-	out := &SolView{
+	out := &PlayerView{
 		Systems:   make(map[string]*KnownSystem, len(v.Systems)),
 		Fleets:    make(map[string]*KnownFleet, len(v.Fleets)),
 		InTransit: make(map[string]*KnownTransit, len(v.InTransit)),
@@ -166,7 +167,7 @@ func cloneSolView(v *SolView) *SolView {
 
 // diffSolView prints a summary of differences between two SolViews.
 // Used for diagnostics when the property assertion fails.
-func diffSolView(t *testing.T, nameA string, a *SolView, nameB string, b *SolView) {
+func diffSolView(t *testing.T, nameA string, a *PlayerView, nameB string, b *PlayerView) {
 	t.Helper()
 	for id, sa := range a.Systems {
 		sb := b.Systems[id]

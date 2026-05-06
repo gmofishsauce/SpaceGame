@@ -1,0 +1,4 @@
+Rank,Name,Obj#,LHS,RA (2000.0),DEC (2000.0),"PM (""/yr)",Angle,Parallax,,Error,Spectral Type,V,Mv,Mass,common name
+1,GJ 434,-,-,11 41 03.0,+34 12 06,0.857,251.4,0.10489,31.107,0.00040,G8 V,5.07,5.37,0.95,61 Ursae Majoris
+2,STUB-A,-,-,11 30 00.0,+35 00 00,0.300,200.0,0.10800,30.200,0.00050,K0 V,8.50,7.42,0.80,Stub Alien Neighbor A
+3,STUB-B,-,-,11 50 00.0,+33 00 00,0.250,180.0,0.10100,32.300,0.00050,K2 V,8.80,7.79,0.75,Stub Alien Neighbor B

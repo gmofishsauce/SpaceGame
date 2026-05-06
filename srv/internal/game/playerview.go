@@ -1,13 +1,16 @@
 package game
 
-// SolView is the player-visible state: everything Sol knows. It is mutated
-// only by the Propagator (the single bridge between EventLog and SolView)
-// and read by HTTP/SSE handlers. Fleet entries are SNAPSHOTS taken at
-// AsOfYear -- they do not alias into Truth.
-type SolView struct {
+// PlayerView is one player's filtered, light-speed-delayed view of the world.
+// It is mutated only by the Propagator (the single bridge between EventLog
+// and the views) and read by HTTP/SSE handlers. Fleet entries are SNAPSHOTS
+// taken at AsOfYear -- they do not alias into Truth. (FR-12)
+//
+// One PlayerView exists per player and lives on GameState.Views, keyed by
+// Owner. (Renamed from SolView in M2.)
+type PlayerView struct {
 	Systems   map[string]*KnownSystem  // keyed by system ID
 	Fleets    map[string]*KnownFleet   // keyed by fleet ID; snapshots, not aliases
-	InTransit map[string]*KnownTransit // keyed by fleet ID; human transits known to Sol
+	InTransit map[string]*KnownTransit // keyed by fleet ID; transits known to this player
 }
 
 // KnownSystem is what the player knows about one star system.
@@ -18,7 +21,7 @@ type KnownSystem struct {
 	EconLevel  int
 	Wealth     float64 // last reported wealth (not extrapolated server-side)
 	LocalUnits map[WeaponType]int
-	FleetIDs   []string // IDs into SolView.Fleets, NOT Truth.Fleets
+	FleetIDs   []string // IDs into PlayerView.Fleets, NOT Truth.Fleets
 }
 
 // KnownFleet is the player's snapshot view of one fleet, frozen at AsOfYear.
@@ -28,7 +31,7 @@ type KnownFleet struct {
 	Name       string
 	Owner      Owner
 	Units      map[WeaponType]int // SNAPSHOT at AsOfYear
-	LocationID string             // "" if in transit (then look in SolView.InTransit)
+	LocationID string             // "" if in transit (then look in PlayerView.InTransit)
 	AsOfYear   float64
 }
 
@@ -45,10 +48,11 @@ type KnownTransit struct {
 	AsOfYear    float64
 }
 
-// SolGroundTruthSnapshot is the single explicit affordance by which the
-// HTTP layer reads Sol's own state from Truth (the player sees Sol with no
-// light-speed delay). Returned by GameState.ReadSolGroundTruth.
-type SolGroundTruthSnapshot struct {
+// HomeGroundTruthSnapshot is the single explicit affordance by which the
+// HTTP layer reads a player's own home-system state from Truth (the player
+// sees their own home with no light-speed delay). Returned by
+// GameState.ReadHomeGroundTruth. (Renamed from SolGroundTruthSnapshot in M2.)
+type HomeGroundTruthSnapshot struct {
 	Status     SystemStatus
 	EconLevel  int
 	Wealth     float64
@@ -57,7 +61,7 @@ type SolGroundTruthSnapshot struct {
 }
 
 // System returns the KnownSystem with the given id, or nil if not found.
-func (v *SolView) System(id string) *KnownSystem {
+func (v *PlayerView) System(id string) *KnownSystem {
 	if v == nil {
 		return nil
 	}
@@ -65,7 +69,7 @@ func (v *SolView) System(id string) *KnownSystem {
 }
 
 // Fleet returns the KnownFleet with the given id, or nil if not found.
-func (v *SolView) Fleet(id string) *KnownFleet {
+func (v *PlayerView) Fleet(id string) *KnownFleet {
 	if v == nil {
 		return nil
 	}

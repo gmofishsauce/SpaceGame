@@ -90,15 +90,15 @@ type PendingCommandDTO struct {
 
 // StateResponse is the full snapshot returned by GET /api/state.
 type StateResponse struct {
-	GameYear             float64             `json:"gameYear"`
-	Paused               bool                `json:"paused"`
-	GameOver             bool                `json:"gameOver"`
-	Winner               string              `json:"winner,omitempty"`
-	WinReason            string              `json:"winReason,omitempty"`
-	Systems              []SystemDTO         `json:"systems"`
-	Events               []EventDTO          `json:"events"`
-	PendingCommands      []PendingCommandDTO `json:"pendingCommands"`
-	HumanFleetsInTransit []FleetDTO          `json:"humanFleetsInTransit"`
+	GameYear        float64             `json:"gameYear"`
+	Paused          bool                `json:"paused"`
+	GameOver        bool                `json:"gameOver"`
+	Winner          string              `json:"winner,omitempty"`
+	WinReason       string              `json:"winReason,omitempty"`
+	Systems         []SystemDTO         `json:"systems"`
+	Events          []EventDTO          `json:"events"`
+	PendingCommands []PendingCommandDTO `json:"pendingCommands"`
+	FleetsInTransit []FleetDTO          `json:"fleetsInTransit"`
 }
 
 // DebugEventDTO is a full authoritative event entry for the debug log.

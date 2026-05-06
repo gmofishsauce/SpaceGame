@@ -2,7 +2,6 @@ package game
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"sort"
 )
@@ -15,7 +14,7 @@ type combatUnit struct {
 
 // Resolve resolves all combat in the given system for the current tick.
 // It mutates ground-truth forces, logs events, and updates system status.
-// (FR-049–FR-054a)
+// (FR-049–FR-054a, FR-20, FR-21, AS-4)
 func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 	humanUnits := collectHumanUnits(state, sys)
 	alienUnits := collectAlienUnits(state, sys)
@@ -24,27 +23,33 @@ func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 		return
 	}
 
-	distFromSol := 0.0
 	displayName := sys.ID
 	if e := state.Catalog.Get(sys.ID); e != nil {
-		distFromSol = e.DistFromSol
 		displayName = e.DisplayName
 	}
+
+	// Capture the pre-combat system owner. All reports triggered by this
+	// combat route to that side's home, per FR-20/FR-21/AS-4. May be ""
+	// (uninhabited/contested), which RecordEvent treats as unreportable.
+	precombatStatus := sys.Status
+	reportTo := statusToOwner(precombatStatus)
 
 	// Step 1: Comm Laser reports alien arrival at c BEFORE any combat. (FR-053)
 	hasCommLaser := systemHasCommLaser(state.truth, sys)
 	if hasCommLaser {
-		state.Events.Record(&Event{
+		state.RecordEvent(&Event{
 			EventYear:   state.Clock,
-			ArrivalYear: state.Clock + distFromSol,
 			SystemID:    sys.ID,
 			Type:        EventFleetArrival,
-			Description: fmt.Sprintf("Alien forces detected at %s (comm laser)", displayName),
-		})
+			Description: fmt.Sprintf("Hostile forces detected at %s (comm laser)", displayName),
+		}, reportTo, true, false)
 	}
 
-	// Step 2: Reporters flee immediately before combat begins. (FR-053)
-	reportersFled := extractAndSendReporters(state, sys, &humanUnits)
+	// Step 2: Reporters flee immediately before combat begins. Each side's
+	// reporter fleets head to that side's home (FR-20). The returned bool
+	// reports whether the precombat-owner side's reporters fled; that
+	// drives event-routing for the captured/retaken/combat events below.
+	reportersFled := extractAndSendReporters(state, sys, &humanUnits, &alienUnits, reportTo)
 
 	// Step 3: Round-based parallel combat. (FR-054a)
 	humanLosses := map[WeaponType]int{}
@@ -79,25 +84,12 @@ func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 		// Remove casualties (end of round — parallel resolution).
 		for _, idx := range uniqueIndices(toDestroyAlien) {
 			alienLosses[alienUnits[idx].weaponType]++
-			state.Alien.TotalLost++
 			alienUnits = append(alienUnits[:idx], alienUnits[idx+1:]...)
 		}
 		for _, idx := range uniqueIndices(toDestroyHuman) {
 			humanLosses[humanUnits[idx].weaponType]++
 			humanUnits = append(humanUnits[:idx], humanUnits[idx+1:]...)
 		}
-	}
-
-	// Check alien exhaustion after losses.
-	if !state.Alien.Exhausted && state.Alien.TotalLost >= AlienExhaustionThreshold {
-		state.Alien.Exhausted = true
-		state.Events.Record(&Event{
-			EventYear:   state.Clock,
-			ArrivalYear: state.Clock, // Sol knows immediately (global event)
-			SystemID:    "sol",
-			Type:        EventAlienExhausted,
-			Description: "Alien forces have been exhausted by cumulative losses.",
-		})
 	}
 
 	// Determine outcome.
@@ -110,47 +102,40 @@ func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 
 	// Update system status and clear forces.
 	if alienWon || draw {
-		oldStatus := sys.Status
 		sys.Status = StatusAlien
 		sys.EconLevel = 0
 		clearHumanForces(state, sys)
-		if oldStatus == StatusHuman {
-			state.Events.Record(&Event{
+		if precombatStatus == StatusHuman {
+			state.RecordEvent(&Event{
 				EventYear:   state.Clock,
-				ArrivalYear: reportArrivalYear(state.Clock, distFromSol, hasCommLaser, reportersFled),
 				SystemID:    sys.ID,
 				Type:        EventSystemCaptured,
 				Description: fmt.Sprintf("%s captured by alien forces", displayName),
-			})
+			}, reportTo, hasCommLaser, reportersFled)
 		}
 	}
 	if humanWon {
-		oldStatus := sys.Status
 		sys.Status = StatusHuman
 		clearAlienForces(state, sys)
-		if oldStatus == StatusAlien {
-			state.Events.Record(&Event{
+		if precombatStatus == StatusAlien {
+			state.RecordEvent(&Event{
 				EventYear:   state.Clock,
-				ArrivalYear: reportArrivalYear(state.Clock, distFromSol, hasCommLaser, reportersFled),
 				SystemID:    sys.ID,
 				Type:        EventSystemRetaken,
 				Description: fmt.Sprintf("%s retaken by human forces", displayName),
-			})
+			}, reportTo, hasCommLaser, reportersFled)
 		}
 	}
 
 	// Write surviving unit counts back to system state.
 	reconcileForces(state, sys, humanUnits, alienUnits)
 
-	// Log internal combat event (always). (FR-052)
+	// Log combat event. Reportable iff a comm laser fired or reporters fled.
 	canReport := hasCommLaser || reportersFled
-	arrYear := reportArrivalYear(state.Clock, distFromSol, hasCommLaser, reportersFled)
-
 	evtType := EventCombatOccurred
 	internal := false
 	if !canReport {
 		evtType = EventCombatSilent
-		arrYear = math.MaxFloat64
 		internal = true
 	}
 
@@ -179,9 +164,8 @@ func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 	//     fleet lands; on fleet destruction, drop them
 	// The propagation pipeline introduced by the dual-state refactor
 	// already supports this without further restructuring.
-	state.Events.Record(&Event{
+	state.RecordEvent(&Event{
 		EventYear:   state.Clock,
-		ArrivalYear: arrYear,
 		SystemID:    sys.ID,
 		Type:        evtType,
 		Description: desc,
@@ -193,7 +177,7 @@ func Resolve(rng *rand.Rand, state *GameState, sys *TrueSystem) {
 			AlienWon:    alienWon,
 			Draw:        draw,
 		},
-	})
+	}, reportTo, hasCommLaser, reportersFled)
 }
 
 // hitProbability returns the probability that an attacker of attackerType
@@ -253,86 +237,68 @@ func collectAlienUnits(state *GameState, sys *TrueSystem) []combatUnit {
 	return units
 }
 
-// extractAndSendReporters removes all Reporter units from the system's human
-// fleets and creates in-transit reporter fleets toward Sol. Returns true if
-// any reporters fled. (FR-053)
-//
-// DEFERRED: reporter survival is not coupled to report delivery.
-//
-// Today, when combat occurs at a system without a comm laser, we spawn
-// reporter fleets toward Sol AND record the combat Event with an
-// ArrivalYear keyed to the reporter's ETA at 0.8c. The two are
-// independent: the Event is delivered to SolView when its ArrivalYear
-// matures, regardless of whether the reporter fleet still exists.
-//
-// This is currently safe ONLY because reporters cannot be destroyed in
-// transit (no in-transit combat exists in the game). If that ever
-// changes -- in-transit interception, alien patrols, escorts that
-// engage passing fleets, or any other mechanism by which a fleet may
-// die en route -- this becomes a real bug: the player will receive
-// reports that should have been lost with their carrier.
-//
-// Fix when needed (review item E in architecturalreview.md):
-//   - give TrueFleet a CarriedEvents []*Event field
-//   - have combat attach the report to the spawned reporter fleet
-//     instead of calling state.Events.Record() directly here
-//   - in processFleetArrivals, Record() each carried event when the
-//     fleet lands; on fleet destruction, drop them
-// The propagation pipeline introduced by the dual-state refactor
-// already supports this without further restructuring.
-func extractAndSendReporters(state *GameState, sys *TrueSystem, humanUnits *[]combatUnit) bool {
-	reportersFled := false
-	if state.truth.System("sol") == nil {
-		return false
+// extractAndSendReporters removes all Reporter units from all fleets at the
+// system (both sides) and creates in-transit reporter fleets toward each
+// side's home. Returns true if the reportTo side had any reporters flee.
+// (FR-020, FR-021, FR-053)
+func extractAndSendReporters(state *GameState, sys *TrueSystem, humanUnits *[]combatUnit, alienUnits *[]combatUnit, reportTo Owner) bool {
+	unitSlices := map[Owner]*[]combatUnit{
+		HumanOwner: humanUnits,
+		AlienOwner: alienUnits,
 	}
-	distToSol := 0.0
-	if e := state.Catalog.Get(sys.ID); e != nil {
-		distToSol = e.DistFromSol
-	}
+	reportersFledBySide := map[Owner]bool{}
 
 	for _, fid := range sys.FleetIDs {
 		fleet := state.truth.Fleets[fid]
-		if fleet == nil || fleet.Owner != HumanOwner || fleet.InTransit {
+		if fleet == nil || fleet.InTransit {
 			continue
 		}
 		reporterCount := fleet.Units[WeaponReporter]
 		if reporterCount == 0 {
 			continue
 		}
-		// Remove reporters from this fleet (they flee before combat)
+
+		homeID := state.Homes[fleet.Owner]
+		if homeID == "" {
+			continue
+		}
+		dist := state.Catalog.Distance(sys.ID, homeID)
+
+		// Remove reporters from this fleet (they flee before combat).
 		delete(fleet.Units, WeaponReporter)
 
-		// Remove reporter combatUnits from the human side
-		filtered := (*humanUnits)[:0]
+		// Remove reporter combatUnits from this side's slice.
+		units := unitSlices[fleet.Owner]
+		filtered := (*units)[:0]
 		removed := 0
-		for _, u := range *humanUnits {
+		for _, u := range *units {
 			if u.weaponType == WeaponReporter && removed < reporterCount {
 				removed++
 			} else {
 				filtered = append(filtered, u)
 			}
 		}
-		*humanUnits = filtered
+		*units = filtered
 
-		// Create a reporter fleet in transit toward Sol
+		// Create a reporter fleet in transit toward this side's home.
+		travelYears := dist / FleetSpeedC
 		reportFleetID := state.NewFleetID()
 		reportFleetName := state.NewFleetName()
-		travelYears := distToSol / FleetSpeedC
-		reportFleet := &TrueFleet{
+		state.truth.Fleets[reportFleetID] = &TrueFleet{
 			ID:          reportFleetID,
 			Name:        reportFleetName,
-			Owner:       HumanOwner,
+			Owner:       fleet.Owner,
 			Units:       map[WeaponType]int{WeaponReporter: reporterCount},
 			LocationID:  "",
-			DestID:      "sol",
+			DestID:      homeID,
 			DepartYear:  state.Clock,
 			ArrivalYear: state.Clock + travelYears,
 			InTransit:   true,
 		}
-		state.truth.Fleets[reportFleetID] = reportFleet
-		reportersFled = true
+		reportersFledBySide[fleet.Owner] = true
 	}
-	return reportersFled
+
+	return reportersFledBySide[reportTo]
 }
 
 // clearHumanForces removes all human units and fleets from a system.
@@ -439,18 +405,6 @@ func reconcileForces(state *GameState, sys *TrueSystem, humanUnits, alienUnits [
 			state.truth.Fleets[alienFleetID].Units = survivingAlien
 		}
 	}
-}
-
-// reportArrivalYear returns the arrival year at Sol for a combat report,
-// choosing the fastest available mechanism (comm laser > reporter > unreported).
-func reportArrivalYear(clock, distFromSol float64, hasCommLaser, reportersFled bool) float64 {
-	if hasCommLaser {
-		return clock + distFromSol
-	}
-	if reportersFled {
-		return clock + distFromSol/FleetSpeedC
-	}
-	return math.MaxFloat64
 }
 
 // summarizeCombat generates a human-readable combat outcome description.
