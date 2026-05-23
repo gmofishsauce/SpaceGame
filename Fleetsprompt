@@ -1,0 +1,26 @@
+hi Claude. Here in /Users/jeff/go/src/github.com/gmofishsauce/SpaceGame
+there is a game,
+  implemented as a  single page application, provided by a small
+  server written in Golang. The server offers  APIs so it can act
+  as the authoritative source of game information. The SPA is
+  implemented entirely in JavaScript. In this repo, the code is
+  authoritative.  Specifications are not. What I would like to do
+  today is change the management of fleets.   Currently fleets are
+  managed by the software. I would like to add a command "fleets..."
+  to      the context menu for every star. This command will raise
+  a new modal dialogue box titled "Manage Fleets". As a part of
+  this change all newly created weapons and communication  artifacts
+  will be created in a single fleet called "1st Fleet" instead of
+  the current  implementation which places each newly constructed
+  artifact in a distinct fleet. Then within  the manage fleets
+  dialogue, the user will be able to create new fleets and assign
+  ships from any fleet to any other fleet. Newly created fleets can
+  be called <<Starname-2nd          fleet>>, <<Starname-3rd fleet>>
+  and so on. So it is not necessary to prompt the user for the
+  fleet name when creating a fleet.  In a typical scenario a user
+  can raise the dialogue box,  create a new fleet called e.g.
+  "Sol-2nd fleet", and then assign some vessels from the
+  ever-growing "Sol-1st fleet" to the "Sol-2nd fleet". Note: at
+  each star, the fleet called <<starname-1st fleet>> is created by
+  software during initialization to hold all vessels that are built
+  at that star.
